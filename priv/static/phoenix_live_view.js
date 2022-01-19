@@ -118,6 +118,7 @@ var LiveView = (() => {
       this.offset = 0;
       this.chunkSize = chunkSize;
       this.chunkTimer = null;
+      this.inFlight = 0;
       this.uploadChannel = liveSocket.channel(`lvu:${entry.ref}`, { token: entry.metadata() });
     }
     error(reason) {
@@ -149,12 +150,24 @@ var LiveView = (() => {
       if (!this.uploadChannel.isJoined()) {
         return;
       }
-      this.uploadChannel.push("chunk", chunk).receive("ok", () => {
-        this.entry.progress(this.offset / this.entry.file.size * 100);
-        if (!this.isDone()) {
-          this.chunkTimer = setTimeout(() => this.readNextChunk(), this.liveSocket.getLatencySim() || 0);
-        }
-      });
+      this.inFlight++;
+      let nextChunk = () => {
+        this.chunkTimer = setTimeout(() => this.readNextChunk(), this.liveSocket.getLatencySim() || 0);
+      };
+      if (this.inFlight < 10 && !this.isDone()) {
+        this.uploadChannel.push("chunk", chunk);
+        console.log("fast", this.inFlight);
+        nextChunk();
+      } else {
+        console.log("slow", this.inFlight);
+        this.uploadChannel.push("chunk", chunk).receive("ok", () => {
+          this.inFlight--;
+          this.entry.progress(this.offset / this.entry.file.size * 100);
+          if (!this.isDone()) {
+            nextChunk();
+          }
+        });
+      }
     }
   };
 
