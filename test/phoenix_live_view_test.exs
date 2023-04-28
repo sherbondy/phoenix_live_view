@@ -16,15 +16,42 @@ defmodule Phoenix.LiveViewUnitTest do
               connect_params: %{},
               connect_info: %{},
               root_view: Phoenix.LiveViewTest.ParamCounterLive,
-              __changed__: %{}
+              __temp__: %{}
             },
             nil,
             %{},
             URI.parse("https://www.example.com")
           )
 
-  @assigns_changes %{key: "value", map: %{foo: :bar}, __changed__: %{}}
-  @assigns_nil_changes %{key: "value", map: %{foo: :bar}, __changed__: nil}
+  describe "stream_configure/3" do
+    test "raises when already streamed" do
+      configured_socket = stream_configure(@socket, :songs, [])
+
+      streamed_socket =
+        Phoenix.Component.update(configured_socket, :streams, fn streams ->
+          Map.put(streams, :songs, %Phoenix.LiveView.LiveStream{})
+        end)
+
+      assert_raise ArgumentError,
+                   "cannot configure stream :songs after it has been streamed",
+                   fn -> stream_configure(streamed_socket, :songs, []) end
+    end
+
+    test "raises when already configured" do
+      configured_socket = stream_configure(@socket, :songs, [])
+
+      assert_raise ArgumentError,
+                   "cannot re-configure stream :songs after it has been configured",
+                   fn -> stream_configure(configured_socket, :songs, []) end
+    end
+
+    test "configures a bespoke dom_id" do
+      dom_id_fun = fn item -> "tunes-#{item.id}" end
+      socket = stream_configure(@socket, :songs, dom_id: dom_id_fun)
+
+      assert get_in(socket.assigns.streams, [:__configured__, :songs, :dom_id]) == dom_id_fun
+    end
+  end
 
   describe "flash" do
     test "get and put" do
@@ -112,7 +139,7 @@ defmodule Phoenix.LiveViewUnitTest do
                [{"tracestate", "one"}, {"traceparent", "two"}]
 
       assert get_connect_info(socket, :peer_data) ==
-               %{address: {127, 0, 0, 1}, port: 111317, ssl_cert: nil}
+               %{address: {127, 0, 0, 1}, port: 111_317, ssl_cert: nil}
 
       assert get_connect_info(socket, :uri) ==
                %URI{host: "www.example.com", path: "/", port: 80, query: "", scheme: "http"}
@@ -202,146 +229,6 @@ defmodule Phoenix.LiveViewUnitTest do
     end
   end
 
-  describe "assign with socket" do
-    test "tracks changes" do
-      socket = assign(@socket, existing: "foo")
-      assert changed?(socket, :existing)
-
-      socket = Utils.clear_changed(socket)
-      socket = assign(socket, existing: "foo")
-      refute changed?(socket, :existing)
-    end
-
-    test "keeps whole maps in changes" do
-      socket = assign(@socket, existing: %{foo: :bar})
-      socket = Utils.clear_changed(socket)
-
-      socket = assign(socket, existing: %{foo: :baz})
-      assert socket.assigns.existing == %{foo: :baz}
-      assert socket.assigns.__changed__.existing == %{foo: :bar}
-
-      socket = assign(socket, existing: %{foo: :bat})
-      assert socket.assigns.existing == %{foo: :bat}
-      assert socket.assigns.__changed__.existing == %{foo: :bar}
-
-      socket = assign(socket, %{existing: %{foo: :bam}})
-      assert socket.assigns.existing == %{foo: :bam}
-      assert socket.assigns.__changed__.existing == %{foo: :bar}
-    end
-  end
-
-  describe "assign with assigns" do
-    test "tracks changes" do
-      assigns = assign(@assigns_changes, key: "value")
-      assert assigns.key == "value"
-      refute changed?(assigns, :key)
-
-      assigns = assign(@assigns_changes, key: "changed")
-      assert assigns.key == "changed"
-      assert changed?(assigns, :key)
-
-      assigns = assign(@assigns_nil_changes, key: "changed")
-      assert assigns.key == "changed"
-      assert assigns.__changed__ == nil
-      assert changed?(assigns, :key)
-    end
-
-    test "keeps whole maps in changes" do
-      assigns = assign(@assigns_changes, map: %{foo: :baz})
-      assert assigns.map == %{foo: :baz}
-      assert assigns.__changed__[:map] == %{foo: :bar}
-
-      assigns = assign(@assigns_nil_changes, map: %{foo: :baz})
-      assert assigns.map == %{foo: :baz}
-      assert assigns.__changed__ == nil
-    end
-  end
-
-  describe "assign_new with socket" do
-    test "uses socket assigns if no parent assigns are present" do
-      socket =
-        @socket
-        |> assign(existing: "existing")
-        |> assign_new(:existing, fn -> "new-existing" end)
-        |> assign_new(:notexisting, fn -> "new-notexisting" end)
-
-      assert socket.assigns == %{
-               existing: "existing",
-               notexisting: "new-notexisting",
-               live_action: nil,
-               flash: %{},
-               __changed__: %{existing: true, notexisting: true}
-             }
-    end
-
-    test "uses parent assigns when present and falls back to socket assigns" do
-      socket =
-        put_in(@socket.private[:assign_new], {%{existing: "existing-parent"}, []})
-        |> assign(existing2: "existing2")
-        |> assign_new(:existing, fn -> "new-existing" end)
-        |> assign_new(:existing2, fn -> "new-existing2" end)
-        |> assign_new(:notexisting, fn -> "new-notexisting" end)
-
-      assert socket.assigns == %{
-               existing: "existing-parent",
-               existing2: "existing2",
-               notexisting: "new-notexisting",
-               live_action: nil,
-               flash: %{},
-               __changed__: %{existing: true, notexisting: true, existing2: true}
-             }
-    end
-  end
-
-  describe "assign_new with assigns" do
-    test "tracks changes" do
-      assigns = assign_new(@assigns_changes, :key, fn -> raise "won't be invoked" end)
-      assert assigns.key == "value"
-      refute changed?(assigns, :key)
-      refute assigns.__changed__[:key]
-
-      assigns = assign_new(@assigns_changes, :another, fn -> "changed" end)
-      assert assigns.another == "changed"
-      assert changed?(assigns, :another)
-
-      assigns = assign_new(@assigns_nil_changes, :another, fn -> "changed" end)
-      assert assigns.another == "changed"
-      assert changed?(assigns, :another)
-      assert assigns.__changed__ == nil
-    end
-  end
-
-  describe "update with socket" do
-    test "tracks changes" do
-      socket = @socket |> assign(key: "value") |> Utils.clear_changed()
-
-      socket = update(socket, :key, fn "value" -> "value" end)
-      assert socket.assigns.key == "value"
-      refute changed?(socket, :key)
-
-      socket = update(socket, :key, fn "value" -> "changed" end)
-      assert socket.assigns.key == "changed"
-      assert changed?(socket, :key)
-    end
-  end
-
-  describe "update with assigns" do
-    test "tracks changes" do
-      assigns = update(@assigns_changes, :key, fn "value" -> "value" end)
-      assert assigns.key == "value"
-      refute changed?(assigns, :key)
-
-      assigns = update(@assigns_changes, :key, fn "value" -> "changed" end)
-      assert assigns.key == "changed"
-      assert changed?(assigns, :key)
-
-      assigns = update(@assigns_nil_changes, :key, fn "value" -> "changed" end)
-      assert assigns.key == "changed"
-      assert changed?(assigns, :key)
-      assert assigns.__changed__ == nil
-    end
-  end
-
   describe "redirect/2" do
     test "requires local path on to" do
       assert_raise ArgumentError, ~r"the :to option in redirect/2 expects a path", fn ->
@@ -358,20 +245,29 @@ defmodule Phoenix.LiveViewUnitTest do
     test "allows external paths" do
       assert redirect(@socket, external: "http://foo.com/bar").redirected ==
                {:redirect, %{external: "http://foo.com/bar"}}
+
+      assert redirect(@socket, external: {:javascript, "alert"}).redirected ==
+               {:redirect, %{external: "javascript:alert"}}
+    end
+
+    test "disallows insecure external paths" do
+      assert_raise ArgumentError, ~r/unsupported scheme given to redirect\/2/, fn ->
+        redirect(@socket, external: "javascript:alert('xss');")
+      end
     end
   end
 
-  describe "push_redirect/2" do
+  describe "push_navigate/2" do
     test "requires local path on to" do
-      assert_raise ArgumentError, ~r"the :to option in push_redirect/2 expects a path", fn ->
-        push_redirect(@socket, to: "http://foo.com")
+      assert_raise ArgumentError, ~r"the :to option in push_navigate/2 expects a path", fn ->
+        push_navigate(@socket, to: "http://foo.com")
       end
 
-      assert_raise ArgumentError, ~r"the :to option in push_redirect/2 expects a path", fn ->
-        push_redirect(@socket, to: "//foo.com")
+      assert_raise ArgumentError, ~r"the :to option in push_navigate/2 expects a path", fn ->
+        push_navigate(@socket, to: "//foo.com")
       end
 
-      assert push_redirect(@socket, to: "/counter/123").redirected ==
+      assert push_navigate(@socket, to: "/counter/123").redirected ==
                {:live, :redirect, %{kind: :push, to: "/counter/123"}}
     end
   end

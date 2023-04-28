@@ -46,7 +46,9 @@ export default class LiveUploader {
       let uploadRef = inputEl.getAttribute(PHX_UPLOAD_REF)
       fileData[uploadRef] = fileData[uploadRef] || []
       entry.ref = this.genFileRef(file)
+      entry.last_modified = file.lastModified
       entry.name = file.name || entry.ref
+      entry.relative_path = file.webkitRelativePath
       entry.type = file.type
       entry.size = file.size
       fileData[uploadRef].push(entry)
@@ -64,12 +66,14 @@ export default class LiveUploader {
     DOM.putPrivate(inputEl, "files", DOM.private(inputEl, "files").filter(f => !Object.is(f, file)))
   }
 
-  static trackFiles(inputEl, files){
+  static trackFiles(inputEl, files, dataTransfer){
     if(inputEl.getAttribute("multiple") !== null){
       let newFiles = files.filter(file => !this.activeFiles(inputEl).find(f => Object.is(f, file)))
       DOM.putPrivate(inputEl, "files", this.activeFiles(inputEl).concat(newFiles))
       inputEl.value = null
     } else {
+      // Reset inputEl files to align output with programmatic changes (i.e. drag and drop)
+      if(dataTransfer && dataTransfer.files.length > 0){ inputEl.files = dataTransfer.files }
       DOM.putPrivate(inputEl, "files", files)
     }
   }

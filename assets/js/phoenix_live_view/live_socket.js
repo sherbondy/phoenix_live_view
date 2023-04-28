@@ -62,7 +62,7 @@
  *
  *     class InMemoryStorage {
  *       constructor() { this.storage = {} }
- *       getItem(keyName) { return this.storage[keyName] }
+ *       getItem(keyName) { return this.storage[keyName] || null }
  *       removeItem(keyName) { delete this.storage[keyName] }
  *       setItem(keyName, keyValue) { this.storage[keyName] = keyValue }
  *     }
@@ -95,8 +95,10 @@ import {
   PHX_THROTTLE,
   PHX_TRACK_UPLOADS,
   PHX_SESSION,
+  PHX_FEEDBACK_FOR,
   RELOAD_JITTER_MIN,
   RELOAD_JITTER_MAX,
+  PHX_REF,
 } from "./constants"
 
 import {
@@ -148,6 +150,7 @@ export default class LiveSocket {
     this.hooks = opts.hooks || {}
     this.uploaders = opts.uploaders || {}
     this.loaderTimeout = opts.loaderTimeout || LOADER_TIMEOUT
+    this.reloadWithJitterTimer = null
     this.maxReloads = opts.maxReloads || MAX_RELOADS
     this.reloadJitterMin = opts.reloadJitterMin || RELOAD_JITTER_MIN
     this.reloadJitterMax = opts.reloadJitterMax || RELOAD_JITTER_MAX
@@ -206,7 +209,12 @@ export default class LiveSocket {
       if(this.joinRootViews()){
         this.bindTopLevelEvents()
         this.socket.connect()
+      } else if(this.main){
+        this.socket.connect()
+      } else {
+        this.bindTopLevelEvents({dead: true})
       }
+      this.joinDeadView()
     }
     if(["complete", "loaded", "interactive"].indexOf(document.readyState) >= 0){
       doConnect()
@@ -215,13 +223,30 @@ export default class LiveSocket {
     }
   }
 
-  disconnect(callback){ this.socket.disconnect(callback) }
+  disconnect(callback){
+    clearTimeout(this.reloadWithJitterTimer)
+    this.socket.disconnect(callback)
+  }
+
+  replaceTransport(transport){
+    clearTimeout(this.reloadWithJitterTimer)
+    this.socket.replaceTransport(transport)
+    this.connect()
+  }
 
   execJS(el, encodedJS, eventType = null){
     this.owner(el, view => JS.exec(eventType, encodedJS, view, el))
   }
 
   // private
+
+  unload(){
+    if(this.unloaded){ return }
+    if(this.main && this.isConnected()){ this.log(this.main, "socket", () => ["disconnect for page nav"]) }
+    this.unloaded = true
+    this.destroyAllViews()
+    this.disconnect()
+  }
 
   triggerDOM(kind, args){ this.domCallbacks[kind](...args) }
 
@@ -257,7 +282,6 @@ export default class LiveSocket {
       if(!latency){
         cb(data)
       } else {
-        console.log(`simulating ${latency}ms of latency from server to client`)
         setTimeout(() => cb(data), latency)
       }
     })
@@ -280,7 +304,6 @@ export default class LiveSocket {
       }
     }
 
-    console.log(`simulating ${latency}ms of latency from client to server`)
     let fakePush = {
       receives: [],
       receive(kind, cb){ this.receives.push([kind, cb]) }
@@ -293,18 +316,23 @@ export default class LiveSocket {
   }
 
   reloadWithJitter(view, log){
-    view.destroy()
+    clearTimeout(this.reloadWithJitterTimer)
     this.disconnect()
     let minMs = this.reloadJitterMin
     let maxMs = this.reloadJitterMax
     let afterMs = Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs
     let tries = Browser.updateLocal(this.localStorage, window.location.pathname, CONSECUTIVE_RELOADS, 0, count => count + 1)
-    log ? log() : this.log(view, "join", () => [`encountered ${tries} consecutive reloads`])
     if(tries > this.maxReloads){
-      this.log(view, "join", () => [`exceeded ${this.maxReloads} consecutive reloads. Entering failsafe mode`])
       afterMs = this.failsafeJitter
     }
-    setTimeout(() => {
+    this.reloadWithJitterTimer = setTimeout(() => {
+      // if view has recovered, such as transport replaced, then cancel
+      if(view.isDestroyed() || view.isConnected()){ return }
+      view.destroy()
+      log ? log() : this.log(view, "join", () => [`encountered ${tries} consecutive reloads`])
+      if(tries > this.maxReloads){
+        this.log(view, "join", () => [`exceeded ${this.maxReloads} consecutive reloads. Entering failsafe mode`])
+      }
       if(this.hasPendingLink()){
         window.location = this.pendingLink
       } else {
@@ -327,6 +355,17 @@ export default class LiveSocket {
 
   channel(topic, params){ return this.socket.channel(topic, params) }
 
+  joinDeadView(){
+    let body = document.body
+    if(body && !this.isPhxView(body) && !this.isPhxView(document.firstElementChild)){
+      let view = this.newRootView(body)
+      view.setHref(this.getHref())
+      view.joinDead()
+      if(!this.main){ this.main = view }
+      window.requestAnimationFrame(() => view.execNewMounted())
+    }
+  }
+
   joinRootViews(){
     let rootsFound = false
     DOM.all(document, `${PHX_VIEW_SELECTOR}:not([${PHX_PARENT_ID}])`, rootEl => {
@@ -334,7 +373,7 @@ export default class LiveSocket {
         let view = this.newRootView(rootEl)
         view.setHref(this.getHref())
         view.join()
-        if(rootEl.getAttribute(PHX_MAIN)){ this.main = view }
+        if(rootEl.hasAttribute(PHX_MAIN)){ this.main = view }
       }
       rootsFound = true
     })
@@ -342,17 +381,18 @@ export default class LiveSocket {
   }
 
   redirect(to, flash){
-    this.disconnect()
+    this.unload()
     Browser.redirect(to, flash)
   }
 
   replaceMain(href, flash, callback = null, linkRef = this.setPendingLink(href)){
+    let liveReferer = this.currentLocation.href
     this.outgoingMainEl = this.outgoingMainEl || this.main.el
     let newMainEl = DOM.cloneNode(this.outgoingMainEl, "")
     this.main.showLoader(this.loaderTimeout)
     this.main.destroy()
 
-    this.main = this.newRootView(newMainEl, flash)
+    this.main = this.newRootView(newMainEl, flash, liveReferer)
     this.main.setRedirect(href)
     this.transitionRemoves()
     this.main.join((joinCount, onDone) => {
@@ -361,7 +401,7 @@ export default class LiveSocket {
           DOM.findPhxSticky(document).forEach(el => newMainEl.appendChild(el))
           this.outgoingMainEl.replaceWith(newMainEl)
           this.outgoingMainEl = null
-          callback && callback()
+          callback && requestAnimationFrame(callback)
           onDone()
         })
       }
@@ -372,16 +412,14 @@ export default class LiveSocket {
     let removeAttr = this.binding("remove")
     elements = elements || DOM.all(document, `[${removeAttr}]`)
     elements.forEach(el => {
-      if(document.body.contains(el)){ // skip children already removed
-        this.execJS(el, el.getAttribute(removeAttr), "remove")
-      }
+      this.execJS(el, el.getAttribute(removeAttr), "remove")
     })
   }
 
   isPhxView(el){ return el.getAttribute && el.getAttribute(PHX_SESSION) !== null }
 
-  newRootView(el, flash){
-    let view = new View(el, this, null, flash)
+  newRootView(el, flash, liveReferer){
+    let view = new View(el, this, null, flash, liveReferer)
     this.roots[view.id] = view
     return view
   }
@@ -407,6 +445,7 @@ export default class LiveSocket {
       this.roots[id].destroy()
       delete this.roots[id]
     }
+    this.main = null
   }
 
   destroyViewByEl(el){
@@ -457,15 +496,16 @@ export default class LiveSocket {
     if(this.prevActive !== document.body){ this.prevActive.blur() }
   }
 
-  bindTopLevelEvents(){
+  bindTopLevelEvents({dead} = {}){
     if(this.boundTopLevelEvents){ return }
 
     this.boundTopLevelEvents = true
     // enter failsafe reload if server has gone away intentionally, such as "disconnect" broadcast
     this.socket.onClose(event => {
-      if(event && event.code === 1000 && this.main){
-        this.reloadWithJitter(this.main)
-      }
+      // unload when navigating href or form submit (such as for firefox)
+      if(event && event.code === 1001){ return this.unload() }
+      // failsafe reload if normal closure and we still have a main LV
+      if(event && event.code === 1000 && this.main){ return this.reloadWithJitter(this.main) }
     })
     document.body.addEventListener("click", function (){ }) // ensure all click events bubble for mobile Safari
     window.addEventListener("pageshow", e => {
@@ -475,9 +515,9 @@ export default class LiveSocket {
         window.location.reload()
       }
     }, true)
-    this.bindNav()
+    if(!dead){ this.bindNav() }
     this.bindClicks()
-    this.bindForms()
+    if(!dead){ this.bindForms() }
     this.bind({keyup: "keyup", keydown: "keydown"}, (e, type, view, targetEl, phxEvent, eventTarget) => {
       let matchKey = targetEl.getAttribute(this.binding(PHX_KEY))
       let pressedKey = e.key && e.key.toLowerCase() // chrome clicked autocompletes send a keydown without key
@@ -509,7 +549,7 @@ export default class LiveSocket {
       let files = Array.from(e.dataTransfer.files || [])
       if(!dropTarget || dropTarget.disabled || files.length === 0 || !(dropTarget.files instanceof FileList)){ return }
 
-      LiveUploader.trackFiles(dropTarget, files)
+      LiveUploader.trackFiles(dropTarget, files, e.dataTransfer)
       dropTarget.dispatchEvent(new Event("input", {bubbles: true}))
     })
     this.on(PHX_TRACK_UPLOADS, e => {
@@ -555,7 +595,7 @@ export default class LiveSocket {
         let windowBinding = this.binding(`window-${event}`)
         let targetPhxEvent = e.target.getAttribute && e.target.getAttribute(binding)
         if(targetPhxEvent){
-          this.debounce(e.target, e, () => {
+          this.debounce(e.target, e, browserEventName, () => {
             this.withinOwners(e.target, view => {
               callback(e, event, view, e.target, targetPhxEvent, null)
             })
@@ -563,7 +603,7 @@ export default class LiveSocket {
         } else {
           DOM.all(document, `[${windowBinding}]`, el => {
             let phxEvent = el.getAttribute(windowBinding)
-            this.debounce(el, e, () => {
+            this.debounce(el, e, browserEventName, () => {
               this.withinOwners(el, view => {
                 callback(e, event, view, el, phxEvent, "window")
               })
@@ -575,7 +615,7 @@ export default class LiveSocket {
   }
 
   bindClicks(){
-    window.addEventListener("mousedown", e => this.clickStartedAtTarget = e.target)
+    window.addEventListener("click", e => this.clickStartedAtTarget = e.target)
     this.bindClick("click", "click", false)
     this.bindClick("mousedown", "capture-click", true)
   }
@@ -593,10 +633,18 @@ export default class LiveSocket {
         this.clickStartedAtTarget = null
       }
       let phxEvent = target && target.getAttribute(click)
-      if(!phxEvent){ return }
+      if(!phxEvent){
+        let href = e.target instanceof HTMLAnchorElement ? e.target.getAttribute("href") : null
+        if(!capture && href !== null && !DOM.wantsNewTab(e) && DOM.isNewPageHref(href, window.location)){
+          this.unload()
+        }
+        return
+      }
       if(target.getAttribute("href") === "#"){ e.preventDefault() }
+      // noop if we are in the middle of awaiting an ack for this el already
+      if(target.hasAttribute(PHX_REF)){ return }
 
-      this.debounce(target, e, () => {
+      this.debounce(target, e, "click", () => {
         this.withinOwners(target, view => {
           JS.exec("click", phxEvent, view, target, ["push", {data: this.eventMeta("click", e, target)}])
         })
@@ -635,15 +683,13 @@ export default class LiveSocket {
 
       this.requestDOMUpdate(() => {
         if(this.main.isConnected() && (type === "patch" && id === this.main.id)){
-          this.main.pushLinkPatch(href, null)
+          this.main.pushLinkPatch(href, null, () => {
+            this.maybeScroll(scroll)
+          })
         } else {
           this.replaceMain(href, null, () => {
             if(root){ this.replaceRootHistory() }
-            if(typeof(scroll) === "number"){
-              setTimeout(() => {
-                window.scrollTo(0, scroll)
-              }, 0) // the body needs to render before we scroll.
-            }
+            this.maybeScroll(scroll)
           })
         }
       })
@@ -651,8 +697,7 @@ export default class LiveSocket {
     window.addEventListener("click", e => {
       let target = closestPhxBinding(e.target, PHX_LIVE_LINK)
       let type = target && target.getAttribute(PHX_LIVE_LINK)
-      let wantsNewTab = e.metaKey || e.ctrlKey || e.button === 1
-      if(!type || !this.isConnected() || !this.main || wantsNewTab){ return }
+      if(!type || !this.isConnected() || !this.main || DOM.wantsNewTab(e)){ return }
 
       let href = target.href
       let linkState = target.getAttribute(PHX_LINK_STATE)
@@ -668,8 +713,20 @@ export default class LiveSocket {
         } else {
           throw new Error(`expected ${PHX_LIVE_LINK} to be "patch" or "redirect", got: ${type}`)
         }
+        let phxClick = target.getAttribute(this.binding("click"))
+        if(phxClick){
+          this.requestDOMUpdate(() => this.execJS(target, phxClick, "click"))
+        }
       })
     }, false)
+  }
+
+  maybeScroll(scroll) {
+    if(typeof(scroll) === "number"){
+      requestAnimationFrame(() => {
+        window.scrollTo(0, scroll)
+      }) // the body needs to render before we scroll.
+    }
   }
 
   dispatchEvent(event, payload = {}){
@@ -687,6 +744,8 @@ export default class LiveSocket {
   }
 
   pushHistoryPatch(href, linkState, targetEl){
+    if(!this.isConnected()){ return Browser.redirect(href) }
+
     this.withPageLoading({to: href, kind: "patch"}, done => {
       this.main.pushLinkPatch(href, targetEl, linkRef => {
         this.historyPatch(href, linkState, linkRef)
@@ -703,6 +762,12 @@ export default class LiveSocket {
   }
 
   historyRedirect(href, linkState, flash){
+    // convert to full href if only path prefix
+    if(!this.isConnected()){ return Browser.redirect(href, flash) }
+    if(/^\/$|^\/[^\/]+.*$/.test(href)){
+      let {protocol, host} = window.location
+      href = `${protocol}//${host}${href}`
+    }
     let scroll = window.scrollY
     this.withPageLoading({to: href, kind: "redirect"}, done => {
       this.replaceMain(href, flash, () => {
@@ -729,13 +794,36 @@ export default class LiveSocket {
 
   bindForms(){
     let iterations = 0
+    let externalFormSubmitted = false
+
+    // disable forms on submit that track phx-change but perform external submit
+    this.on("submit", e => {
+      let phxSubmit = e.target.getAttribute(this.binding("submit"))
+      let phxChange = e.target.getAttribute(this.binding("change"))
+      if(!externalFormSubmitted && phxChange && !phxSubmit){
+        externalFormSubmitted = true
+        e.preventDefault()
+        this.withinOwners(e.target, view => {
+          view.disableForm(e.target)
+          // safari needs next tick
+          window.requestAnimationFrame(() => {
+            if(DOM.isUnloadableFormSubmit(e)){ this.unload() }
+            e.target.submit()
+          })
+        })
+      }
+    }, true)
+
     this.on("submit", e => {
       let phxEvent = e.target.getAttribute(this.binding("submit"))
-      if(!phxEvent){ return }
+      if(!phxEvent){
+        if(DOM.isUnloadableFormSubmit(e)){ this.unload() }
+        return
+      }
       e.preventDefault()
       e.target.disabled = true
       this.withinOwners(e.target, view => {
-        JS.exec("submit", phxEvent, view, e.target, ["push", {}])
+        JS.exec("submit", phxEvent, view, e.target, ["push", {submitter: e.submitter}])
       })
     }, false)
 
@@ -758,7 +846,7 @@ export default class LiveSocket {
 
         DOM.putPrivate(input, "prev-iteration", {at: currentIterations, type: type})
 
-        this.debounce(input, e, () => {
+        this.debounce(input, e, type, () => {
           this.withinOwners(dispatcher, view => {
             DOM.putPrivate(input, PHX_HAS_FOCUSED, true)
             if(!DOM.isTextualInput(input)){
@@ -769,14 +857,31 @@ export default class LiveSocket {
         })
       }, false)
     }
+    this.on("reset", (e) => {
+      let form = e.target
+      DOM.resetForm(form, this.binding(PHX_FEEDBACK_FOR))
+      let input = Array.from(form.elements).find(el => el.type === "reset")
+      // wait until next tick to get updated input value
+      window.requestAnimationFrame(() => {
+        input.dispatchEvent(new Event("input", {bubbles: true, cancelable: false}))
+      })
+    })
   }
 
-  debounce(el, event, callback){
+  debounce(el, event, eventType, callback){
+    if(eventType === "blur" || eventType === "focusout"){ return callback() }
+
     let phxDebounce = this.binding(PHX_DEBOUNCE)
     let phxThrottle = this.binding(PHX_THROTTLE)
     let defaultDebounce = this.defaults.debounce.toString()
     let defaultThrottle = this.defaults.throttle.toString()
-    DOM.debounce(el, event, phxDebounce, defaultDebounce, phxThrottle, defaultThrottle, callback)
+
+    this.withinOwners(el, view => {
+      let asyncFilter = () => !view.isDestroyed() && document.body.contains(el)
+      DOM.debounce(el, event, phxDebounce, defaultDebounce, phxThrottle, defaultThrottle, asyncFilter, () => {
+        callback()
+      })
+    })
   }
 
   silenceEvents(callback){
@@ -796,12 +901,11 @@ class TransitionSet {
   constructor(){
     this.transitions = new Set()
     this.pendingOps = []
-    this.reset()
   }
 
   reset(){
     this.transitions.forEach(timer => {
-      cancelTimeout(timer)
+      clearTimeout(timer)
       this.transitions.delete(timer)
     })
     this.flushPendingOps()
@@ -820,7 +924,7 @@ class TransitionSet {
     let timer = setTimeout(() => {
       this.transitions.delete(timer)
       onDone()
-      if(this.size() === 0){ this.flushPendingOps() }
+      this.flushPendingOps()
     }, time)
     this.transitions.add(timer)
   }
@@ -830,7 +934,11 @@ class TransitionSet {
   size(){ return this.transitions.size }
 
   flushPendingOps(){
-    this.pendingOps.forEach(op => op())
-    this.pendingOps = []
+    if(this.size() > 0){ return }
+    let op = this.pendingOps.shift()
+    if(op){
+      op()
+      this.flushPendingOps()
+    }
   }
 }

@@ -1,10 +1,10 @@
 defmodule Phoenix.LiveView.HooksTest do
-  use ExUnit.Case
+  use ExUnit.Case, async: false
 
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
 
-  alias Phoenix.LiveView
+  alias Phoenix.Component
   alias Phoenix.LiveViewTest.{Endpoint, HooksLive}
 
   @endpoint Endpoint
@@ -70,7 +70,7 @@ defmodule Phoenix.LiveView.HooksTest do
 
     HooksLive.attach_hook(lv, :multiply_inc, :handle_event, fn
       "inc", _, socket ->
-        {:halt, LiveView.update(socket, :count, &(&1 * 2))}
+        {:halt, Component.update(socket, :count, &(&1 * 2))}
 
       "dec", _, socket ->
         {:cont, socket}
@@ -86,6 +86,48 @@ defmodule Phoenix.LiveView.HooksTest do
 
     assert lv |> element("#inc") |> render_click() =~ "count:7"
     assert lv |> element("#inc") |> render_click() =~ "count:8"
+  end
+
+  test "handle_event/3 halts and replies", %{conn: conn} do
+    {:ok, lv, _html} = live(conn, "/lifecycle")
+
+    HooksLive.attach_hook(lv, :greet_1, :handle_event, fn "greet", %{"name" => name}, socket ->
+      {:halt, %{msg: "Hello, #{name}!"}, socket}
+    end)
+
+    HooksLive.attach_hook(lv, :greet_2, :handle_event, fn "greet", %{"name" => name}, socket ->
+      {:halt, %{msg: "Hi, #{name}!"}, socket}
+    end)
+
+    render_hook(lv, :greet, %{name: "Mike"})
+
+    assert_reply(lv, %{msg: "Hello, Mike!"})
+  end
+
+  test "only handle_event/3 error prints {:halt, map, %Socket{}}", %{conn: conn} do
+    {:ok, lv, _html} = live(conn, "/lifecycle")
+
+    HooksLive.attach_hook(lv, :boom, :handle_event, fn _, _, _ -> :boom end)
+
+    result =
+      HooksLive.exits_with(lv, ArgumentError, fn ->
+        lv |> element("#inc") |> render_click()
+      end)
+
+    assert result =~ "{:halt, map, %Socket{}}"
+    assert result =~ "Got: :boom"
+
+    {:ok, lv, _html} = live(conn, "/lifecycle")
+
+    HooksLive.attach_hook(lv, :reply, :handle_info, fn :boom, socket ->
+      {:halt, %{}, socket}
+    end)
+
+    assert ExUnit.CaptureLog.capture_log(fn ->
+             send(lv.pid, :boom)
+             ref = Process.monitor(lv.pid)
+             assert_receive {:DOWN, ^ref, _, _, _}
+           end) =~ "Got: {:halt, %{}, #Phoenix.LiveView.Socket<"
   end
 
   test "handle_params/3 raises when hook result is invalid", %{conn: conn} do
@@ -104,10 +146,10 @@ defmodule Phoenix.LiveView.HooksTest do
 
     HooksLive.attach_hook(lv, :hook, :handle_params, fn
       _params, _uri, %{assigns: %{params_hook_ref: _}} = socket ->
-        {:halt, LiveView.update(socket, :params_hook_ref, &(&1 + 1))}
+        {:halt, Component.update(socket, :params_hook_ref, &(&1 + 1))}
 
       _params, _uri, socket ->
-        {:halt, LiveView.assign(socket, :params_hook_ref, 0)}
+        {:halt, Component.assign(socket, :params_hook_ref, 0)}
     end)
 
     lv |> element("#patch") |> render_click() =~ "params_hook:0"
@@ -129,13 +171,13 @@ defmodule Phoenix.LiveView.HooksTest do
 
     HooksLive.attach_hook(lv, :hook, :handle_params, fn
       _params, _uri, %{assigns: %{params_hook_ref: 0}} = socket ->
-        {:halt, LiveView.update(socket, :params_hook_ref, &(&1 + 1))}
+        {:halt, Component.update(socket, :params_hook_ref, &(&1 + 1))}
 
       _params, _uri, %{assigns: %{params_hook_ref: 1}} = socket ->
         {:cont, socket}
 
       _params, _uri, socket ->
-        {:halt, LiveView.assign(socket, :params_hook_ref, 0)}
+        {:halt, Component.assign(socket, :params_hook_ref, 0)}
     end)
 
     lv |> element("#patch") |> render_click() =~ "params_hook:0"
@@ -206,16 +248,16 @@ defmodule Phoenix.LiveView.HooksTest do
     {:ok, lv, _html} = live(conn, "/lifecycle/components")
 
     assert HooksLive.exits_with(lv, ArgumentError, fn ->
-      lv |> element("#attach") |> render_click()
-    end) =~ "lifecycle hooks are not supported on stateful components."
+             lv |> element("#attach") |> render_click()
+           end) =~ "lifecycle hooks are not supported on stateful components."
   end
 
   test "detach_hook raises when given a live component socket", %{conn: conn} do
     {:ok, lv, _html} = live(conn, "/lifecycle/components")
 
     assert HooksLive.exits_with(lv, ArgumentError, fn ->
-      lv |> element("#detach") |> render_click()
-    end) =~ "lifecycle hooks are not supported on stateful components."
+             lv |> element("#detach") |> render_click()
+           end) =~ "lifecycle hooks are not supported on stateful components."
   end
 
   test "stage_info", %{conn: conn} do
@@ -259,5 +301,35 @@ defmodule Phoenix.LiveView.HooksTest do
              callbacks?: true,
              exported?: false
            }
+  end
+
+  test "afte_render hook", %{conn: conn} do
+    {:ok, lv, _html} = live(conn, "/lifecycle")
+
+    assert render(lv) =~ "count:0"
+
+    HooksLive.attach_hook(lv, :after, :after_render, fn socket ->
+      if Phoenix.Component.changed?(socket, :count) && socket.assigns.count >= 1 do
+        Phoenix.Component.assign(socket, :count, socket.assigns.count * 10)
+      else
+        socket
+      end
+    end)
+
+    assert lv |> element("#inc") |> render_click() =~ "count:1"
+
+    socket = HooksLive.run(lv, fn socket -> {:reply, socket, socket} end)
+    assert socket.assigns.count == 10
+
+    assert lv |> element("#inc") |> render_click() =~ "count:1"
+    socket = HooksLive.run(lv, fn socket -> {:reply, socket, socket} end)
+    assert socket.assigns.count == 110
+
+    HooksLive.detach_hook(lv, :after, :after_render)
+
+    assert lv |> element("#inc") |> render_click() =~ "count:111"
+    assert lv |> element("#inc") |> render_click() =~ "count:112"
+    socket = HooksLive.run(lv, fn socket -> {:reply, socket, socket} end)
+    assert socket.assigns.count == 112
   end
 end

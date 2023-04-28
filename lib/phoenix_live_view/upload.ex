@@ -9,7 +9,8 @@ defmodule Phoenix.LiveView.Upload do
   @doc """
   Allows an upload.
   """
-  def allow_upload(%Socket{} = socket, name, opts) when is_atom(name) and is_list(opts) do
+  def allow_upload(%Socket{} = socket, name, opts)
+      when (is_atom(name) or is_binary(name)) and is_list(opts) do
     case uploaded_entries(socket, name) do
       {[], []} ->
         :ok
@@ -37,7 +38,7 @@ defmodule Phoenix.LiveView.Upload do
   @doc """
   Disallows a previously allowed upload.
   """
-  def disallow_upload(%Socket{} = socket, name) when is_atom(name) do
+  def disallow_upload(%Socket{} = socket, name) when is_atom(name) or is_binary(name) do
     case uploaded_entries(socket, name) do
       {[], []} ->
         uploads = socket.assigns[:uploads] || %{}
@@ -70,11 +71,16 @@ defmodule Phoenix.LiveView.Upload do
   """
   def cancel_upload(socket, name, entry_ref) do
     upload_config = Map.fetch!(socket.assigns[:uploads] || %{}, name)
-    %UploadEntry{} = entry = UploadConfig.get_entry_by_ref(upload_config, entry_ref)
 
-    upload_config
-    |> UploadConfig.cancel_entry(entry)
-    |> update_uploads(socket)
+    case UploadConfig.get_entry_by_ref(upload_config, entry_ref) do
+      %UploadEntry{} = entry ->
+        upload_config
+        |> UploadConfig.cancel_entry(entry)
+        |> update_uploads(socket)
+
+      _ ->
+        raise ArgumentError, "no entry in upload \"#{inspect(name)}\" with ref \"#{entry_ref}\""
+    end
   end
 
   @doc """

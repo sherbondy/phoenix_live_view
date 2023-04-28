@@ -16,6 +16,18 @@ var LiveView = (() => {
     return a;
   };
   var __markAsModule = (target) => __defProp(target, "__esModule", { value: true });
+  var __objRest = (source, exclude) => {
+    var target = {};
+    for (var prop in source)
+      if (__hasOwnProp.call(source, prop) && exclude.indexOf(prop) < 0)
+        target[prop] = source[prop];
+    if (source != null && __getOwnPropSymbols)
+      for (var prop of __getOwnPropSymbols(source)) {
+        if (exclude.indexOf(prop) < 0 && __propIsEnum.call(source, prop))
+          target[prop] = source[prop];
+      }
+    return target;
+  };
   var __export = (target, all) => {
     __markAsModule(target);
     for (var name in all)
@@ -31,8 +43,8 @@ var LiveView = (() => {
   // js/phoenix_live_view/constants.js
   var CONSECUTIVE_RELOADS = "consecutive-reloads";
   var MAX_RELOADS = 10;
-  var RELOAD_JITTER_MIN = 1e3;
-  var RELOAD_JITTER_MAX = 3e3;
+  var RELOAD_JITTER_MIN = 5e3;
+  var RELOAD_JITTER_MAX = 1e4;
   var FAILSAFE_JITTER = 3e4;
   var PHX_EVENT_CLASSES = [
     "phx-click-loading",
@@ -84,6 +96,8 @@ var LiveView = (() => {
   var PHX_DEBOUNCE = "debounce";
   var PHX_THROTTLE = "throttle";
   var PHX_UPDATE = "update";
+  var PHX_STREAM = "stream";
+  var PHX_STREAM_REF = "data-phx-stream";
   var PHX_KEY = "key";
   var PHX_PRIVATE = "phxPrivate";
   var PHX_AUTO_RECOVER = "auto-recover";
@@ -91,6 +105,7 @@ var LiveView = (() => {
   var PHX_LV_PROFILE = "phx:live-socket:profiling";
   var PHX_LV_LATENCY_SIM = "phx:live-socket:latency-sim";
   var PHX_PROGRESS = "progress";
+  var PHX_MOUNTED = "mounted";
   var LOADER_TIMEOUT = 1;
   var BEFORE_UNLOAD_LOADER_TIMEOUT = 200;
   var BINDING_PREFIX = "phx-";
@@ -109,6 +124,7 @@ var LiveView = (() => {
   var REPLY = "r";
   var TITLE = "t";
   var TEMPLATES = "p";
+  var STREAM = "stream";
 
   // js/phoenix_live_view/entry_uploader.js
   var EntryUploader = class {
@@ -188,7 +204,7 @@ var LiveView = (() => {
   };
   var closestPhxBinding = (el, binding, borderEl) => {
     do {
-      if (el.matches(`[${binding}]`)) {
+      if (el.matches(`[${binding}]`) && !el.disabled) {
         return el;
       }
       el = el.parentElement || el.parentNode;
@@ -318,6 +334,34 @@ var LiveView = (() => {
     isPhxDestroyed(node) {
       return node.id && DOM.private(node, "destroyed") ? true : false;
     },
+    wantsNewTab(e) {
+      let wantsNewTab = e.ctrlKey || e.shiftKey || e.metaKey || e.button && e.button === 1;
+      return wantsNewTab || e.target.getAttribute("target") === "_blank";
+    },
+    isUnloadableFormSubmit(e) {
+      return !e.defaultPrevented && !this.wantsNewTab(e);
+    },
+    isNewPageHref(href, currentLocation) {
+      if (href.startsWith("mailto:") || href.startsWith("tel:")) {
+        return false;
+      }
+      let url;
+      try {
+        url = new URL(href);
+      } catch (e) {
+        try {
+          url = new URL(href, currentLocation);
+        } catch (e2) {
+          return true;
+        }
+      }
+      if (url.host === currentLocation.host && url.protocol === currentLocation.protocol) {
+        if (url.pathname === currentLocation.pathname && url.search === currentLocation.search) {
+          return url.hash === "" && !url.href.endsWith("#");
+        }
+      }
+      return true;
+    },
     markPhxChildDestroyed(el) {
       if (this.isPhxChild(el)) {
         el.setAttribute(PHX_SESSION, "");
@@ -343,11 +387,12 @@ var LiveView = (() => {
     },
     findParentCIDs(node, cids) {
       let initial = new Set(cids);
-      return cids.reduce((acc, cid) => {
+      let parentCids = cids.reduce((acc, cid) => {
         let selector = `[${PHX_COMPONENT}="${cid}"] [${PHX_COMPONENT}]`;
         this.filterWithinSameLiveView(this.all(node, selector), node).map((el) => parseInt(el.getAttribute(PHX_COMPONENT))).forEach((childCID) => acc.delete(childCID));
         return acc;
       }, initial);
+      return parentCids.size === 0 ? new Set(cids) : parentCids;
     },
     filterWithinSameLiveView(nodes, parent) {
       if (parent.querySelector(PHX_VIEW_SELECTOR)) {
@@ -393,10 +438,14 @@ var LiveView = (() => {
     },
     putTitle(str) {
       let titleEl = document.querySelector("title");
-      let { prefix, suffix } = titleEl.dataset;
-      document.title = `${prefix || ""}${str}${suffix || ""}`;
+      if (titleEl) {
+        let { prefix, suffix } = titleEl.dataset;
+        document.title = `${prefix || ""}${str}${suffix || ""}`;
+      } else {
+        document.title = str;
+      }
     },
-    debounce(el, event, phxDebounce, defaultDebounce, phxThrottle, defaultThrottle, callback) {
+    debounce(el, event, phxDebounce, defaultDebounce, phxThrottle, defaultThrottle, asyncFilter, callback) {
       let debounce = el.getAttribute(phxDebounce);
       let throttle = el.getAttribute(phxThrottle);
       if (debounce === "") {
@@ -433,10 +482,18 @@ var LiveView = (() => {
             } else {
               callback();
               this.putPrivate(el, THROTTLED, true);
-              setTimeout(() => this.triggerCycle(el, DEBOUNCE_TRIGGER), timeout);
+              setTimeout(() => {
+                if (asyncFilter()) {
+                  this.triggerCycle(el, DEBOUNCE_TRIGGER);
+                }
+              }, timeout);
             }
           } else {
-            setTimeout(() => this.triggerCycle(el, DEBOUNCE_TRIGGER, currentCycle), timeout);
+            setTimeout(() => {
+              if (asyncFilter()) {
+                this.triggerCycle(el, DEBOUNCE_TRIGGER, currentCycle);
+              }
+            }, timeout);
           }
           let form = el.form;
           if (form && this.once(form, "bind-debounce")) {
@@ -477,15 +534,27 @@ var LiveView = (() => {
       this.putPrivate(el, key, [currentCycle, trigger]);
       return currentCycle;
     },
-    discardError(container, el, phxFeedbackFor) {
-      let field = el.getAttribute && el.getAttribute(phxFeedbackFor);
-      let input = field && container.querySelector(`[id="${field}"], [name="${field}"]`);
-      if (!input) {
-        return;
+    maybeHideFeedback(container, input, phxFeedbackFor) {
+      if (!(this.private(input, PHX_HAS_FOCUSED) || this.private(input, PHX_HAS_SUBMITTED))) {
+        let feedbacks = [input.name];
+        if (input.name.endsWith("[]")) {
+          feedbacks.push(input.name.slice(0, -2));
+        }
+        let selector = feedbacks.map((f) => `[${phxFeedbackFor}="${f}"]`).join(", ");
+        DOM.all(container, selector, (el) => el.classList.add(PHX_NO_FEEDBACK_CLASS));
       }
-      if (!(this.private(input, PHX_HAS_FOCUSED) || this.private(input.form, PHX_HAS_SUBMITTED))) {
-        el.classList.add(PHX_NO_FEEDBACK_CLASS);
-      }
+    },
+    resetForm(form, phxFeedbackFor) {
+      Array.from(form.elements).forEach((input) => {
+        let query = `[${phxFeedbackFor}="${input.id}"],
+                   [${phxFeedbackFor}="${input.name}"],
+                   [${phxFeedbackFor}="${input.name.replace(/\[\]$/, "")}"]`;
+        this.deletePrivate(input, PHX_HAS_FOCUSED);
+        this.deletePrivate(input, PHX_HAS_SUBMITTED);
+        this.all(document, query, (feedbackEl) => {
+          feedbackEl.classList.add(PHX_NO_FEEDBACK_CLASS);
+        });
+      });
     },
     showError(inputEl, phxFeedbackFor) {
       if (inputEl.id || inputEl.name) {
@@ -732,6 +801,7 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
       return this._isDone;
     }
     error(reason = "failed") {
+      this.fileEl.removeEventListener(PHX_LIVE_FILE_UPDATED, this._onElUpdated);
       this.view.pushFileProgress(this.fileEl, this.ref, { error: reason });
       LiveUploader.clearFiles(this.fileEl);
     }
@@ -751,6 +821,7 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
       return {
         last_modified: this.file.lastModified,
         name: this.file.name,
+        relative_path: this.file.webkitRelativePath,
         size: this.file.size,
         type: this.file.type,
         ref: this.ref
@@ -805,7 +876,9 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
         let uploadRef = inputEl.getAttribute(PHX_UPLOAD_REF);
         fileData[uploadRef] = fileData[uploadRef] || [];
         entry.ref = this.genFileRef(file);
+        entry.last_modified = file.lastModified;
         entry.name = file.name || entry.ref;
+        entry.relative_path = file.webkitRelativePath;
         entry.type = file.type;
         entry.size = file.size;
         fileData[uploadRef].push(entry);
@@ -820,12 +893,15 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
     static untrackFile(inputEl, file) {
       dom_default.putPrivate(inputEl, "files", dom_default.private(inputEl, "files").filter((f) => !Object.is(f, file)));
     }
-    static trackFiles(inputEl, files) {
+    static trackFiles(inputEl, files, dataTransfer) {
       if (inputEl.getAttribute("multiple") !== null) {
         let newFiles = files.filter((file) => !this.activeFiles(inputEl).find((f) => Object.is(f, file)));
         dom_default.putPrivate(inputEl, "files", this.activeFiles(inputEl).concat(newFiles));
         inputEl.value = null;
       } else {
+        if (dataTransfer && dataTransfer.files.length > 0) {
+          inputEl.files = dataTransfer.files;
+        }
         dom_default.putPrivate(inputEl, "files", files);
       }
     }
@@ -876,6 +952,62 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
     }
   };
 
+  // js/phoenix_live_view/aria.js
+  var ARIA = {
+    focusMain() {
+      let target = document.querySelector("main h1, main, h1");
+      if (target) {
+        let origTabIndex = target.tabIndex;
+        target.tabIndex = -1;
+        target.focus();
+        target.tabIndex = origTabIndex;
+      }
+    },
+    anyOf(instance, classes) {
+      return classes.find((name) => instance instanceof name);
+    },
+    isFocusable(el, interactiveOnly) {
+      return el instanceof HTMLAnchorElement && el.rel !== "ignore" || el instanceof HTMLAreaElement && el.href !== void 0 || !el.disabled && this.anyOf(el, [HTMLInputElement, HTMLSelectElement, HTMLTextAreaElement, HTMLButtonElement]) || el instanceof HTMLIFrameElement || (el.tabIndex > 0 || !interactiveOnly && el.tabIndex === 0 && el.getAttribute("tabindex") !== null && el.getAttribute("aria-hidden") !== "true");
+    },
+    attemptFocus(el, interactiveOnly) {
+      if (this.isFocusable(el, interactiveOnly)) {
+        try {
+          el.focus();
+        } catch (e) {
+        }
+      }
+      return !!document.activeElement && document.activeElement.isSameNode(el);
+    },
+    focusFirstInteractive(el) {
+      let child = el.firstElementChild;
+      while (child) {
+        if (this.attemptFocus(child, true) || this.focusFirstInteractive(child, true)) {
+          return true;
+        }
+        child = child.nextElementSibling;
+      }
+    },
+    focusFirst(el) {
+      let child = el.firstElementChild;
+      while (child) {
+        if (this.attemptFocus(child) || this.focusFirst(child)) {
+          return true;
+        }
+        child = child.nextElementSibling;
+      }
+    },
+    focusLast(el) {
+      let child = el.lastElementChild;
+      while (child) {
+        if (this.attemptFocus(child) || this.focusLast(child)) {
+          return true;
+        }
+        child = child.previousElementSibling;
+      }
+    }
+  };
+  var aria_default = ARIA;
+
   // js/phoenix_live_view/hooks.js
   var Hooks = {
     LiveFileUpload: {
@@ -913,6 +1045,18 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
       },
       destroyed() {
         URL.revokeObjectURL(this.url);
+      }
+    },
+    FocusWrap: {
+      mounted() {
+        this.focusStart = this.el.firstElementChild;
+        this.focusEnd = this.el.lastElementChild;
+        this.focusStart.addEventListener("focus", () => aria_default.focusLast(this.el));
+        this.focusEnd.addEventListener("focus", () => aria_default.focusFirst(this.el));
+        this.el.addEventListener("phx:show-end", () => this.el.focus());
+        if (window.getComputedStyle(this.el).display !== "none") {
+          aria_default.focusFirst(this.el);
+        }
       }
     }
   };
@@ -1186,6 +1330,8 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
         } else {
           toNode = toElement(toNode);
         }
+      } else if (toNode.nodeType === DOCUMENT_FRAGMENT_NODE$1) {
+        toNode = toNode.firstElementChild;
       }
       var getNodeKey = options.getNodeKey || defaultGetNodeKey;
       var onBeforeNodeAdded = options.onBeforeNodeAdded || noop;
@@ -1195,6 +1341,10 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
       var onBeforeNodeDiscarded = options.onBeforeNodeDiscarded || noop;
       var onNodeDiscarded = options.onNodeDiscarded || noop;
       var onBeforeElChildrenUpdated = options.onBeforeElChildrenUpdated || noop;
+      var skipFromChildren = options.skipFromChildren || noop;
+      var addChild = options.addChild || function(parent, child) {
+        return parent.appendChild(child);
+      };
       var childrenOnly = options.childrenOnly === true;
       var fromNodesLookup = Object.create(null);
       var keyedRemovalList = [];
@@ -1295,6 +1445,7 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
         }
       }
       function morphChildren(fromEl, toEl) {
+        var skipFrom = skipFromChildren(fromEl);
         var curToNodeChild = toEl.firstChild;
         var curFromNodeChild = fromEl.firstChild;
         var curToNodeKey;
@@ -1306,7 +1457,7 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
           while (curToNodeChild) {
             toNextSibling = curToNodeChild.nextSibling;
             curToNodeKey = getNodeKey(curToNodeChild);
-            while (curFromNodeChild) {
+            while (!skipFrom && curFromNodeChild) {
               fromNextSibling = curFromNodeChild.nextSibling;
               if (curToNodeChild.isSameNode && curToNodeChild.isSameNode(curFromNodeChild)) {
                 curToNodeChild = toNextSibling;
@@ -1363,7 +1514,9 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
               curFromNodeChild = fromNextSibling;
             }
             if (curToNodeKey && (matchingFromEl = fromNodesLookup[curToNodeKey]) && compareNodeNames(matchingFromEl, curToNodeChild)) {
-              fromEl.appendChild(matchingFromEl);
+              if (!skipFrom) {
+                addChild(fromEl, matchingFromEl);
+              }
               morphEl(matchingFromEl, curToNodeChild);
             } else {
               var onBeforeNodeAddedResult = onBeforeNodeAdded(curToNodeChild);
@@ -1374,7 +1527,7 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
                 if (curToNodeChild.actualize) {
                   curToNodeChild = curToNodeChild.actualize(fromEl.ownerDocument || doc);
                 }
-                fromEl.appendChild(curToNodeChild);
+                addChild(fromEl, curToNodeChild);
                 handleNodeAdded(curToNodeChild);
               }
             }
@@ -1452,15 +1605,19 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
         }
       });
     }
-    constructor(view, container, id, html, targetCID) {
+    constructor(view, container, id, html, streams, targetCID) {
       this.view = view;
       this.liveSocket = view.liveSocket;
       this.container = container;
       this.id = id;
       this.rootID = view.root.id;
       this.html = html;
+      this.streams = streams;
+      this.streamInserts = {};
       this.targetCID = targetCID;
       this.cidPatch = isCid(this.targetCID);
+      this.pendingRemoves = [];
+      this.phxRemove = this.liveSocket.binding("remove");
       this.callbacks = {
         beforeadded: [],
         beforeupdated: [],
@@ -1485,7 +1642,9 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
       this.callbacks[`after${kind}`].forEach((callback) => callback(...args));
     }
     markPrunableContentForRemoval() {
-      dom_default.all(this.container, "[phx-update=append] > *, [phx-update=prepend] > *", (el) => {
+      let phxUpdate = this.liveSocket.binding(PHX_UPDATE);
+      dom_default.all(this.container, `[${phxUpdate}=${PHX_STREAM}]`, (el) => el.innerHTML = "");
+      dom_default.all(this.container, `[${phxUpdate}=append] > *, [${phxUpdate}=prepend] > *`, (el) => {
         el.setAttribute(PHX_PRUNE, "");
       });
     }
@@ -1501,11 +1660,10 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
       let phxFeedbackFor = liveSocket.binding(PHX_FEEDBACK_FOR);
       let disableWith = liveSocket.binding(PHX_DISABLE_WITH);
       let phxTriggerExternal = liveSocket.binding(PHX_TRIGGER_ACTION);
-      let phxRemove = liveSocket.binding("remove");
       let added = [];
+      let trackedInputs = [];
       let updates = [];
       let appendPrependUpdates = [];
-      let pendingRemoves = [];
       let externalFormTriggered = null;
       let diffHTML = liveSocket.time("premorph container prep", () => {
         return this.buildDiffHTML(container, html, phxUpdate, targetContainer);
@@ -1513,16 +1671,53 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
       this.trackBefore("added", container);
       this.trackBefore("updated", container, container);
       liveSocket.time("morphdom", () => {
+        this.streams.forEach(([ref, inserts, deleteIds, reset]) => {
+          Object.entries(inserts).forEach(([key, streamAt]) => {
+            this.streamInserts[key] = { ref, streamAt };
+          });
+          if (reset !== void 0) {
+            dom_default.all(container, `[${PHX_STREAM_REF}="${ref}"]`, (child) => {
+              this.removeStreamChildElement(child);
+            });
+          }
+          deleteIds.forEach((id) => {
+            let child = container.querySelector(`[id="${id}"]`);
+            if (child) {
+              this.removeStreamChildElement(child);
+            }
+          });
+        });
         morphdom_esm_default(targetContainer, diffHTML, {
           childrenOnly: targetContainer.getAttribute(PHX_COMPONENT) === null,
           getNodeKey: (node) => {
             return dom_default.isPhxDestroyed(node) ? null : node.id;
+          },
+          skipFromChildren: (from) => {
+            return from.getAttribute(phxUpdate) === PHX_STREAM;
+          },
+          addChild: (parent, child) => {
+            let { ref, streamAt } = this.getStreamInsert(child);
+            if (ref === void 0) {
+              return parent.appendChild(child);
+            }
+            dom_default.putSticky(child, PHX_STREAM_REF, (el) => el.setAttribute(PHX_STREAM_REF, ref));
+            if (streamAt === 0) {
+              parent.insertAdjacentElement("afterbegin", child);
+            } else if (streamAt === -1) {
+              parent.appendChild(child);
+            } else if (streamAt > 0) {
+              let sibling = Array.from(parent.children)[streamAt];
+              parent.insertBefore(child, sibling);
+            }
           },
           onBeforeNodeAdded: (el) => {
             this.trackBefore("added", el);
             return el;
           },
           onNodeAdded: (el) => {
+            if (el.getAttribute) {
+              this.maybeReOrderStream(el);
+            }
             if (el instanceof HTMLImageElement && el.srcset) {
               el.srcset = el.srcset;
             } else if (el instanceof HTMLVideoElement && el.autoplay) {
@@ -1531,27 +1726,23 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
             if (dom_default.isNowTriggerFormExternal(el, phxTriggerExternal)) {
               externalFormTriggered = el;
             }
-            dom_default.discardError(targetContainer, el, phxFeedbackFor);
+            if (el.getAttribute && el.getAttribute("name")) {
+              trackedInputs.push(el);
+            }
             if (dom_default.isPhxChild(el) && view.ownsElement(el) || dom_default.isPhxSticky(el) && view.ownsElement(el.parentNode)) {
               this.trackAfter("phxChildAdded", el);
             }
             added.push(el);
           },
-          onNodeDiscarded: (el) => {
-            if (dom_default.isPhxChild(el) || dom_default.isPhxSticky(el)) {
-              liveSocket.destroyViewByEl(el);
-            }
-            this.trackAfter("discarded", el);
-          },
+          onNodeDiscarded: (el) => this.onNodeDiscarded(el),
           onBeforeNodeDiscarded: (el) => {
             if (el.getAttribute && el.getAttribute(PHX_PRUNE) !== null) {
               return true;
             }
-            if (el.parentNode !== null && dom_default.isPhxUpdate(el.parentNode, phxUpdate, ["append", "prepend"]) && el.id) {
+            if (el.parentElement !== null && el.id && dom_default.isPhxUpdate(el.parentElement, phxUpdate, [PHX_STREAM, "append", "prepend"])) {
               return false;
             }
-            if (el.getAttribute && el.getAttribute(phxRemove)) {
-              pendingRemoves.push(el);
+            if (this.maybePendingRemove(el)) {
               return false;
             }
             if (this.skipCIDSibling(el)) {
@@ -1564,6 +1755,7 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
               externalFormTriggered = el;
             }
             updates.push(el);
+            this.maybeReOrderStream(el);
           },
           onBeforeElUpdated: (fromEl, toEl) => {
             dom_default.cleanChildNodes(toEl, phxUpdate);
@@ -1573,7 +1765,7 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
             if (dom_default.isPhxSticky(fromEl)) {
               return false;
             }
-            if (dom_default.isIgnored(fromEl, phxUpdate)) {
+            if (dom_default.isIgnored(fromEl, phxUpdate) || fromEl.form && fromEl.form.isSameNode(externalFormTriggered)) {
               this.trackBefore("updated", fromEl, toEl);
               dom_default.mergeAttrs(fromEl, toEl, { isIgnored: true });
               updates.push(fromEl);
@@ -1602,14 +1794,14 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
               return false;
             }
             dom_default.copyPrivates(toEl, fromEl);
-            dom_default.discardError(targetContainer, toEl, phxFeedbackFor);
             let isFocusedFormEl = focused && fromEl.isSameNode(focused) && dom_default.isFormInput(fromEl);
-            if (isFocusedFormEl) {
+            if (isFocusedFormEl && fromEl.type !== "hidden") {
               this.trackBefore("updated", fromEl, toEl);
               dom_default.mergeFocusedInput(fromEl, toEl);
               dom_default.syncAttrsToProps(fromEl);
               updates.push(fromEl);
               dom_default.applyStickyOperations(fromEl);
+              trackedInputs.push(fromEl);
               return false;
             } else {
               if (dom_default.isPhxUpdate(toEl, phxUpdate, ["append", "prepend"])) {
@@ -1617,6 +1809,9 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
               }
               dom_default.syncAttrsToProps(toEl);
               dom_default.applyStickyOperations(toEl);
+              if (toEl.getAttribute("name")) {
+                trackedInputs.push(toEl);
+              }
               this.trackBefore("updated", fromEl, toEl);
               return true;
             }
@@ -1631,10 +1826,69 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
           appendPrependUpdates.forEach((update) => update.perform());
         });
       }
+      trackedInputs.forEach((input) => {
+        dom_default.maybeHideFeedback(targetContainer, input, phxFeedbackFor);
+      });
       liveSocket.silenceEvents(() => dom_default.restoreFocus(focused, selectionStart, selectionEnd));
       dom_default.dispatchEvent(document, "phx:update");
       added.forEach((el) => this.trackAfter("added", el));
       updates.forEach((el) => this.trackAfter("updated", el));
+      this.transitionPendingRemoves();
+      if (externalFormTriggered) {
+        liveSocket.unload();
+        externalFormTriggered.submit();
+      }
+      return true;
+    }
+    onNodeDiscarded(el) {
+      if (dom_default.isPhxChild(el) || dom_default.isPhxSticky(el)) {
+        this.liveSocket.destroyViewByEl(el);
+      }
+      this.trackAfter("discarded", el);
+    }
+    maybePendingRemove(node) {
+      if (node.getAttribute && node.getAttribute(this.phxRemove) !== null) {
+        this.pendingRemoves.push(node);
+        return true;
+      } else {
+        return false;
+      }
+    }
+    removeStreamChildElement(child) {
+      if (!this.maybePendingRemove(child)) {
+        child.remove();
+        this.onNodeDiscarded(child);
+      }
+    }
+    getStreamInsert(el) {
+      let insert = el.id ? this.streamInserts[el.id] : {};
+      return insert || {};
+    }
+    maybeReOrderStream(el) {
+      let { ref, streamAt } = this.getStreamInsert(el);
+      if (streamAt === void 0) {
+        return;
+      }
+      dom_default.putSticky(el, PHX_STREAM_REF, (el2) => el2.setAttribute(PHX_STREAM_REF, ref));
+      if (streamAt === 0) {
+        el.parentElement.insertBefore(el, el.parentElement.firstElementChild);
+      } else if (streamAt > 0) {
+        let children = Array.from(el.parentElement.children);
+        let oldIndex = children.indexOf(el);
+        if (streamAt >= children.length - 1) {
+          el.parentElement.appendChild(el);
+        } else {
+          let sibling = children[streamAt];
+          if (oldIndex > streamAt) {
+            el.parentElement.insertBefore(el, sibling);
+          } else {
+            el.parentElement.insertBefore(el, sibling.nextElementSibling);
+          }
+        }
+      }
+    }
+    transitionPendingRemoves() {
+      let { pendingRemoves, liveSocket } = this;
       if (pendingRemoves.length > 0) {
         liveSocket.transitionRemoves(pendingRemoves);
         liveSocket.requestDOMUpdate(() => {
@@ -1648,11 +1902,6 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
           this.trackAfter("transitionsDiscarded", pendingRemoves);
         });
       }
-      if (externalFormTriggered) {
-        liveSocket.disconnect();
-        externalFormTriggered.submit();
-      }
-      return true;
     }
     isCIDPatch() {
       return this.cidPatch;
@@ -1694,6 +1943,9 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
         return diffContainer.outerHTML;
       }
     }
+    indexOf(parent, child) {
+      return Array.from(parent.children).indexOf(child);
+    }
   };
 
   // js/phoenix_live_view/rendered.js
@@ -1714,13 +1966,14 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
       return this.viewId;
     }
     toString(onlyCids) {
-      return this.recursiveToString(this.rendered, this.rendered[COMPONENTS], onlyCids);
+      let [str, streams] = this.recursiveToString(this.rendered, this.rendered[COMPONENTS], onlyCids);
+      return [str, streams];
     }
     recursiveToString(rendered, components = rendered[COMPONENTS], onlyCids) {
       onlyCids = onlyCids ? new Set(onlyCids) : null;
-      let output = { buffer: "", components, onlyCids };
+      let output = { buffer: "", components, onlyCids, streams: new Set() };
       this.toOutputBuffer(rendered, null, output);
-      return output.buffer;
+      return [output.buffer, output.streams];
     }
     componentCIDs(diff) {
       return Object.keys(diff[COMPONENTS] || {}).map((i) => parseInt(i));
@@ -1785,7 +2038,8 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
       for (let key in source) {
         let val = source[key];
         let targetVal = target[key];
-        if (isObject(val) && val[STATIC] === void 0 && isObject(targetVal)) {
+        let isObjVal = isObject(val);
+        if (isObjVal && val[STATIC] === void 0 && isObject(targetVal)) {
           this.doMutableMerge(targetVal, val);
         } else {
           target[key] = val;
@@ -1804,7 +2058,8 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
       return merged;
     }
     componentToString(cid) {
-      return this.recursiveCIDToString(this.rendered[COMPONENTS], cid);
+      let [str, streams] = this.recursiveCIDToString(this.rendered[COMPONENTS], cid);
+      return [str, streams];
     }
     pruneCIDs(cids) {
       cids.forEach((cid) => delete this.rendered[COMPONENTS][cid]);
@@ -1835,7 +2090,8 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
       }
     }
     comprehensionToBuffer(rendered, templates, output) {
-      let { [DYNAMICS]: dynamics, [STATIC]: statics } = rendered;
+      let { [DYNAMICS]: dynamics, [STATIC]: statics, [STREAM]: stream } = rendered;
+      let [_ref, _inserts, deleteIds, reset] = stream || [null, {}, [], null];
       statics = this.templateStatic(statics, templates);
       let compTemplates = templates || rendered[TEMPLATES];
       for (let d = 0; d < dynamics.length; d++) {
@@ -1846,10 +2102,16 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
           output.buffer += statics[i];
         }
       }
+      if (stream !== void 0 && (rendered[DYNAMICS].length > 0 || deleteIds.length > 0 || reset)) {
+        rendered[DYNAMICS] = [];
+        output.streams.add(stream);
+      }
     }
     dynamicToBuffer(rendered, templates, output) {
       if (typeof rendered === "number") {
-        output.buffer += this.recursiveCIDToString(output.components, rendered, output.onlyCids);
+        let [str, streams] = this.recursiveCIDToString(output.components, rendered, output.onlyCids);
+        output.buffer += str;
+        output.streams = new Set([...output.streams, ...streams]);
       } else if (isObject(rendered)) {
         this.toOutputBuffer(rendered, templates, output);
       } else {
@@ -1859,7 +2121,8 @@ removing illegal node: "${(childNode.outerHTML || childNode.nodeValue).trim()}"
     recursiveCIDToString(components, cid, onlyCids) {
       let component = components[cid] || logError(`no component for CID ${cid}`, components);
       let template = document.createElement("template");
-      template.innerHTML = this.recursiveToString(component, components, onlyCids);
+      let [html, streams] = this.recursiveToString(component, components, onlyCids);
+      template.innerHTML = html;
       let container = template.content;
       let skip = onlyCids && !onlyCids.has(cid);
       let [hasChildNodes, hasChildComponents] = Array.from(container.childNodes).reduce(([hasNodes, hasComponents], child, i) => {
@@ -1894,12 +2157,12 @@ within:
       }, [false, false]);
       if (!hasChildNodes && !hasChildComponents) {
         logError("expected at least one HTML element tag inside a component, but the component is empty:\n", template.innerHTML.trim());
-        return this.createSpan("", cid).outerHTML;
+        return [this.createSpan("", cid).outerHTML, streams];
       } else if (!hasChildNodes && hasChildComponents) {
         logError("expected at least one HTML element tag directly inside a component, but only subcomponents were found. A component must render at least one HTML tag directly inside itself.", template.innerHTML.trim());
-        return template.innerHTML;
+        return [template.innerHTML, streams];
       } else {
-        return template.innerHTML;
+        return [template.innerHTML, streams];
       }
     }
     createSpan(text, cid) {
@@ -1986,6 +2249,7 @@ within:
   };
 
   // js/phoenix_live_view/js.js
+  var focusStack = null;
   var JS = {
     exec(eventType, phxEvent, view, sourceEl, defaults) {
       let [defaultKind, defaultArgs] = defaults || [null, {}];
@@ -2001,6 +2265,16 @@ within:
     },
     isVisible(el) {
       return !!(el.offsetWidth || el.offsetHeight || el.getClientRects().length > 0);
+    },
+    exec_exec(eventType, phxEvent, view, sourceEl, el, [attr, to]) {
+      let nodes = to ? dom_default.all(document, to) : [sourceEl];
+      nodes.forEach((node) => {
+        let encodedJS = node.getAttribute(attr);
+        if (!encodedJS) {
+          throw new Error(`expected ${attr} to contain JS command on "${to}"`);
+        }
+        view.liveSocket.execJS(node, encodedJS, eventType);
+      });
     },
     exec_dispatch(eventType, phxEvent, view, sourceEl, el, { to, event, detail, bubbles }) {
       detail = detail || {};
@@ -2018,16 +2292,40 @@ within:
       view.withinTargets(phxTarget, (targetView, targetCtx) => {
         if (eventType === "change") {
           let { newCid, _target, callback } = args;
-          _target = _target || (sourceEl instanceof HTMLInputElement ? sourceEl.name : void 0);
+          _target = _target || (dom_default.isFormInput(sourceEl) ? sourceEl.name : void 0);
           if (_target) {
             pushOpts._target = _target;
           }
           targetView.pushInput(sourceEl, targetCtx, newCid, event || phxEvent, pushOpts, callback);
         } else if (eventType === "submit") {
-          targetView.submitForm(sourceEl, targetCtx, event || phxEvent, pushOpts);
+          let { submitter } = args;
+          targetView.submitForm(sourceEl, targetCtx, event || phxEvent, submitter, pushOpts);
         } else {
           targetView.pushEvent(eventType, sourceEl, targetCtx, event || phxEvent, data, pushOpts);
         }
+      });
+    },
+    exec_navigate(eventType, phxEvent, view, sourceEl, el, { href, replace }) {
+      view.liveSocket.historyRedirect(href, replace ? "replace" : "push");
+    },
+    exec_patch(eventType, phxEvent, view, sourceEl, el, { href, replace }) {
+      view.liveSocket.pushHistoryPatch(href, replace ? "replace" : "push", sourceEl);
+    },
+    exec_focus(eventType, phxEvent, view, sourceEl, el) {
+      window.requestAnimationFrame(() => aria_default.attemptFocus(el));
+    },
+    exec_focus_first(eventType, phxEvent, view, sourceEl, el) {
+      window.requestAnimationFrame(() => aria_default.focusFirstInteractive(el) || aria_default.focusFirst(el));
+    },
+    exec_push_focus(eventType, phxEvent, view, sourceEl, el) {
+      window.requestAnimationFrame(() => focusStack = el || sourceEl);
+    },
+    exec_pop_focus(eventType, phxEvent, view, sourceEl, el) {
+      window.requestAnimationFrame(() => {
+        if (focusStack) {
+          focusStack.focus();
+        }
+        focusStack = null;
       });
     },
     exec_add_class(eventType, phxEvent, view, sourceEl, el, { names, transition, time }) {
@@ -2037,10 +2335,7 @@ within:
       this.addOrRemoveClasses(el, [], names, transition, time, view);
     },
     exec_transition(eventType, phxEvent, view, sourceEl, el, { time, transition }) {
-      let [transition_start, running, transition_end] = transition;
-      let onStart = () => this.addOrRemoveClasses(el, transition_start.concat(running), []);
-      let onDone = () => this.addOrRemoveClasses(el, transition_end, transition_start.concat(running));
-      view.transition(time, onStart, onDone);
+      this.addOrRemoveClasses(el, [], [], transition, time, view);
     },
     exec_toggle(eventType, phxEvent, view, sourceEl, el, { display, ins, outs, time }) {
       this.toggle(eventType, view, el, display, ins, outs, time);
@@ -2091,7 +2386,8 @@ within:
           }
           let onStart = () => {
             this.addOrRemoveClasses(el, inStartClasses, outClasses.concat(outStartClasses).concat(outEndClasses));
-            dom_default.putSticky(el, "toggle", (currentEl) => currentEl.style.display = display || "block");
+            let stickyDisplay = display || this.defaultDisplay(el);
+            dom_default.putSticky(el, "toggle", (currentEl) => currentEl.style.display = stickyDisplay);
             window.requestAnimationFrame(() => {
               this.addOrRemoveClasses(el, inClasses, []);
               window.requestAnimationFrame(() => this.addOrRemoveClasses(el, inEndClasses, inStartClasses));
@@ -2113,7 +2409,8 @@ within:
         } else {
           window.requestAnimationFrame(() => {
             el.dispatchEvent(new Event("phx:show-start"));
-            dom_default.putSticky(el, "toggle", (currentEl) => currentEl.style.display = display || "block");
+            let stickyDisplay = display || this.defaultDisplay(el);
+            dom_default.putSticky(el, "toggle", (currentEl) => currentEl.style.display = stickyDisplay);
             el.dispatchEvent(new Event("phx:show-end"));
           });
         }
@@ -2158,13 +2455,20 @@ within:
     },
     filterToEls(sourceEl, { to }) {
       return to ? dom_default.all(document, to) : [sourceEl];
+    },
+    defaultDisplay(el) {
+      return { tr: "table-row", td: "table-cell" }[el.tagName.toLowerCase()] || "block";
     }
   };
   var js_default = JS;
 
   // js/phoenix_live_view/view.js
-  var serializeForm = (form, meta, onlyNames = []) => {
+  var serializeForm = (form, metadata, onlyNames = []) => {
+    let _a = metadata, { submitter } = _a, meta = __objRest(_a, ["submitter"]);
     let formData = new FormData(form);
+    if (submitter && submitter.hasAttribute("name") && submitter.form && submitter.form === form) {
+      formData.append(submitter.name, submitter.value);
+    }
     let toRemove = [];
     formData.forEach((val, key, _index) => {
       if (val instanceof File) {
@@ -2184,7 +2488,8 @@ within:
     return params.toString();
   };
   var View = class {
-    constructor(el, liveSocket, parentView, flash) {
+    constructor(el, liveSocket, parentView, flash, liveReferer) {
+      this.isDead = false;
       this.liveSocket = liveSocket;
       this.flash = flash;
       this.parent = parentView;
@@ -2216,14 +2521,12 @@ within:
         return {
           redirect: this.redirect ? this.href : void 0,
           url: this.redirect ? void 0 : this.href || void 0,
-          params: this.connectParams(),
+          params: this.connectParams(liveReferer),
           session: this.getSession(),
           static: this.getStatic(),
           flash: this.flash
         };
       });
-      this.showLoader(this.liveSocket.loaderTimeout);
-      this.bindChannel();
     }
     setHref(href) {
       this.href = href;
@@ -2233,15 +2536,16 @@ within:
       this.href = href;
     }
     isMain() {
-      return this.el.getAttribute(PHX_MAIN) !== null;
+      return this.el.hasAttribute(PHX_MAIN);
     }
-    connectParams() {
+    connectParams(liveReferer) {
       let params = this.liveSocket.params(this.el);
       let manifest = dom_default.all(document, `[${this.binding(PHX_TRACK_STATIC)}]`).map((node) => node.src || node.href).filter((url) => typeof url === "string");
       if (manifest.length > 0) {
         params["_track_static"] = manifest;
       }
       params["_mounts"] = this.joinCount;
+      params["_live_referer"] = liveReferer;
       return params;
     }
     isConnected() {
@@ -2288,9 +2592,13 @@ within:
         this.setContainerClasses(PHX_DISCONNECTED_CLASS);
       }
     }
+    execAll(binding) {
+      dom_default.all(this.el, `[${binding}]`, (el) => this.liveSocket.execJS(el, el.getAttribute(binding)));
+    }
     hideLoader() {
       clearTimeout(this.loaderTimer);
       this.setContainerClasses(PHX_CONNECTED_CLASS);
+      this.execAll(this.binding("connected"));
     }
     triggerReconnected() {
       for (let id in this.viewHooks) {
@@ -2326,11 +2634,10 @@ within:
     applyDiff(type, rawDiff, callback) {
       this.log(type, () => ["", clone(rawDiff)]);
       let { diff, reply, events, title } = Rendered.extract(rawDiff);
-      if (title) {
-        dom_default.putTitle(title);
-      }
       callback({ diff, reply, events });
-      return reply;
+      if (title) {
+        window.requestAnimationFrame(() => dom_default.putTitle(title));
+      }
     }
     onJoin(resp) {
       let { rendered, container } = resp;
@@ -2344,7 +2651,7 @@ within:
       browser_default.dropLocal(this.liveSocket.localStorage, window.location.pathname, CONSECUTIVE_RELOADS);
       this.applyDiff("mount", rendered, ({ diff, events }) => {
         this.rendered = new Rendered(this.id, diff);
-        let html = this.renderContainer(null, "join");
+        let [html, streams] = this.renderContainer(null, "join");
         this.dropPendingRefs();
         let forms = this.formsForRecovery(html);
         this.joinCount++;
@@ -2352,12 +2659,12 @@ within:
           forms.forEach(([form, newForm, newCid], i) => {
             this.pushFormRecovery(form, newCid, (resp2) => {
               if (i === forms.length - 1) {
-                this.onJoinComplete(resp2, html, events);
+                this.onJoinComplete(resp2, html, streams, events);
               }
             });
           });
         } else {
-          this.onJoinComplete(resp, html, events);
+          this.onJoinComplete(resp, html, streams, events);
         }
       });
     }
@@ -2367,9 +2674,9 @@ within:
         el.removeAttribute(PHX_REF_SRC);
       });
     }
-    onJoinComplete({ live_patch }, html, events) {
+    onJoinComplete({ live_patch }, html, streams, events) {
       if (this.joinCount > 1 || this.parent && !this.parent.isJoinPending()) {
-        return this.applyJoinPatch(live_patch, html, events);
+        return this.applyJoinPatch(live_patch, html, streams, events);
       }
       let newChildren = dom_default.findPhxChildrenInFragment(html, this.id).filter((toEl) => {
         let fromEl = toEl.id && this.el.querySelector(`[id="${toEl.id}"]`);
@@ -2381,32 +2688,33 @@ within:
       });
       if (newChildren.length === 0) {
         if (this.parent) {
-          this.root.pendingJoinOps.push([this, () => this.applyJoinPatch(live_patch, html, events)]);
+          this.root.pendingJoinOps.push([this, () => this.applyJoinPatch(live_patch, html, streams, events)]);
           this.parent.ackJoin(this);
         } else {
           this.onAllChildJoinsComplete();
-          this.applyJoinPatch(live_patch, html, events);
+          this.applyJoinPatch(live_patch, html, streams, events);
         }
       } else {
-        this.root.pendingJoinOps.push([this, () => this.applyJoinPatch(live_patch, html, events)]);
+        this.root.pendingJoinOps.push([this, () => this.applyJoinPatch(live_patch, html, streams, events)]);
       }
     }
     attachTrueDocEl() {
       this.el = dom_default.byId(this.id);
       this.el.setAttribute(PHX_ROOT_ID, this.root.id);
     }
-    applyJoinPatch(live_patch, html, events) {
+    execNewMounted() {
+      dom_default.all(this.el, `[${this.binding(PHX_HOOK)}], [data-phx-${PHX_HOOK}]`, (hookEl) => {
+        this.maybeAddNewHook(hookEl);
+      });
+      dom_default.all(this.el, `[${this.binding(PHX_MOUNTED)}]`, (el) => this.maybeMounted(el));
+    }
+    applyJoinPatch(live_patch, html, streams, events) {
       this.attachTrueDocEl();
-      let patch = new DOMPatch(this, this.el, this.id, html, null);
+      let patch = new DOMPatch(this, this.el, this.id, html, streams, null);
       patch.markPrunableContentForRemoval();
       this.performPatch(patch, false);
       this.joinNewChildren();
-      dom_default.all(this.el, `[${this.binding(PHX_HOOK)}], [data-phx-${PHX_HOOK}]`, (hookEl) => {
-        let hook = this.addHook(hookEl);
-        if (hook) {
-          hook.__mounted();
-        }
-      });
+      this.execNewMounted();
       this.joinPending = false;
       this.liveSocket.dispatchEvents(events);
       this.applyPendingUpdates();
@@ -2429,15 +2737,29 @@ within:
         return hook;
       }
     }
+    maybeMounted(el) {
+      let phxMounted = el.getAttribute(this.binding(PHX_MOUNTED));
+      let hasBeenInvoked = phxMounted && dom_default.private(el, "mounted");
+      if (phxMounted && !hasBeenInvoked) {
+        this.liveSocket.execJS(el, phxMounted);
+        dom_default.putPrivate(el, "mounted", true);
+      }
+    }
+    maybeAddNewHook(el, force) {
+      let newHook = this.addHook(el);
+      if (newHook) {
+        newHook.__mounted();
+      }
+    }
     performPatch(patch, pruneCids) {
       let removedEls = [];
       let phxChildrenAdded = false;
       let updatedHookIds = new Set();
       patch.after("added", (el) => {
         this.liveSocket.triggerDOM("onNodeAdded", [el]);
-        let newHook = this.addHook(el);
-        if (newHook) {
-          newHook.__mounted();
+        this.maybeAddNewHook(el);
+        if (el.getAttribute) {
+          this.maybeMounted(el);
         }
       });
       patch.after("phxChildAdded", (el) => {
@@ -2544,7 +2866,7 @@ within:
       });
     }
     update(diff, events) {
-      if (this.isJoinPending() || this.liveSocket.hasPendingLink() && !dom_default.isPhxSticky(this.el)) {
+      if (this.isJoinPending() || this.liveSocket.hasPendingLink() && this.root.isMain()) {
         return this.pendingDiffs.push({ diff, events });
       }
       this.rendered.mergeDiff(diff);
@@ -2560,8 +2882,8 @@ within:
         });
       } else if (!isEmpty(diff)) {
         this.liveSocket.time("full patch complete", () => {
-          let html = this.renderContainer(diff, "update");
-          let patch = new DOMPatch(this, this.el, this.id, html, null);
+          let [html, streams] = this.renderContainer(diff, "update");
+          let patch = new DOMPatch(this, this.el, this.id, html, streams, null);
           phxChildrenAdded = this.performPatch(patch, true);
         });
       }
@@ -2574,15 +2896,15 @@ within:
       return this.liveSocket.time(`toString diff (${kind})`, () => {
         let tag = this.el.tagName;
         let cids = diff ? this.rendered.componentCIDs(diff).concat(this.pruningCIDs) : null;
-        let html = this.rendered.toString(cids);
-        return `<${tag}>${html}</${tag}>`;
+        let [html, streams] = this.rendered.toString(cids);
+        return [`<${tag}>${html}</${tag}>`, streams];
       });
     }
     componentPatch(diff, cid) {
       if (isEmpty(diff))
         return false;
-      let html = this.rendered.componentToString(cid);
-      let patch = new DOMPatch(this, this.el, this.id, html, cid);
+      let [html, streams] = this.rendered.componentToString(cid);
+      let patch = new DOMPatch(this, this.el, this.id, html, streams, cid);
       let childrenAdded = this.performPatch(patch, true);
       return childrenAdded;
     }
@@ -2617,6 +2939,13 @@ within:
     applyPendingUpdates() {
       this.pendingDiffs.forEach(({ diff, events }) => this.update(diff, events));
       this.pendingDiffs = [];
+      this.eachChild((child) => child.applyPendingUpdates());
+    }
+    eachChild(callback) {
+      let children = this.root.children[this.id] || {};
+      for (let id in children) {
+        callback(this.getChildById(id));
+      }
     }
     onChannel(event, cb) {
       this.liveSocket.onChannel(this.channel, event, (resp) => {
@@ -2640,9 +2969,7 @@ within:
       this.channel.onClose((reason) => this.onClose(reason));
     }
     destroyAllChildren() {
-      for (let id in this.root.children[this.id]) {
-        this.getChildById(id).destroy();
-      }
+      this.eachChild((child) => child.destroy());
     }
     onLiveRedirect(redir) {
       let { to, kind, flash } = redir;
@@ -2663,7 +2990,12 @@ within:
     isDestroyed() {
       return this.destroyed;
     }
+    joinDead() {
+      this.isDead = true;
+    }
     join(callback) {
+      this.showLoader(this.liveSocket.loaderTimeout);
+      this.bindChannel();
       if (this.isMain()) {
         this.stopCallback = this.liveSocket.withPageLoading({ to: this.href, kind: "initial" });
       }
@@ -2681,7 +3013,10 @@ within:
       });
     }
     onJoinError(resp) {
-      if (resp.reason === "unauthorized" || resp.reason === "stale") {
+      if (resp.reason === "reload") {
+        this.log("error", () => [`failed mount with ${resp.status}. Falling back to page request`, resp]);
+        return this.onRedirect({ to: this.href });
+      } else if (resp.reason === "unauthorized" || resp.reason === "stale") {
         this.log("error", () => ["unauthorized live_redirect. Falling back to page request", resp]);
         return this.onRedirect({ to: this.href });
       }
@@ -2696,13 +3031,15 @@ within:
         return this.onLiveRedirect(resp.live_redirect);
       }
       this.log("error", () => ["unable to join", resp]);
-      return this.liveSocket.reloadWithJitter(this);
+      if (this.liveSocket.isConnected()) {
+        this.liveSocket.reloadWithJitter(this);
+      }
     }
     onClose(reason) {
       if (this.isDestroyed()) {
         return;
       }
-      if (this.isJoinPending() && document.visibilityState !== "hidden" || this.liveSocket.hasPendingLink() && reason !== "leave") {
+      if (this.liveSocket.hasPendingLink() && reason !== "leave") {
         return this.liveSocket.reloadWithJitter(this);
       }
       this.destroyAllChildren();
@@ -2716,7 +3053,9 @@ within:
     }
     onError(reason) {
       this.onClose(reason);
-      this.log("error", () => ["view crashed", reason]);
+      if (this.liveSocket.isConnected()) {
+        this.log("error", () => ["view crashed", reason]);
+      }
       if (!this.liveSocket.isUnloaded()) {
         this.displayError();
       }
@@ -2727,6 +3066,7 @@ within:
       }
       this.showLoader();
       this.setContainerClasses(PHX_DISCONNECTED_CLASS, PHX_ERROR_CLASS);
+      this.execAll(this.binding("disconnected"));
     }
     pushWithReply(refGenerator, event, payload, onReply = function() {
     }) {
@@ -2744,9 +3084,6 @@ within:
       }
       return this.liveSocket.wrapPush(this, { timeout: true }, () => {
         return this.channel.push(event, payload, PUSH_TIMEOUT).receive("ok", (resp) => {
-          if (ref !== null) {
-            this.undoRefs(ref);
-          }
           let finish = (hookReply) => {
             if (resp.redirect) {
               this.onRedirect(resp.redirect);
@@ -2757,15 +3094,18 @@ within:
             if (resp.live_redirect) {
               this.onLiveRedirect(resp.live_redirect);
             }
+            if (ref !== null) {
+              this.undoRefs(ref);
+            }
             onLoadingDone();
             onReply(resp, hookReply);
           };
           if (resp.diff) {
             this.liveSocket.requestDOMUpdate(() => {
-              let hookReply = this.applyDiff("update", resp.diff, ({ diff, events }) => {
+              this.applyDiff("update", resp.diff, ({ diff, reply, events }) => {
                 this.update(diff, events);
+                finish(reply);
               });
-              finish(hookReply);
             });
           } else {
             finish(null);
@@ -2774,6 +3114,9 @@ within:
       });
     }
     undoRefs(ref) {
+      if (!this.isConnected()) {
+        return;
+      }
       dom_default.all(document, `[${PHX_REF_SRC}="${this.id}"][${PHX_REF}="${ref}"]`, (el) => {
         let disabledVal = el.getAttribute(PHX_DISABLED);
         el.removeAttribute(PHX_REF);
@@ -2921,10 +3264,11 @@ within:
       let cid = isCid(forceCid) ? forceCid : this.targetComponentID(inputEl.form, targetCtx);
       let refGenerator = () => this.putRef([inputEl, inputEl.form], "change", opts);
       let formData;
+      let meta = this.extractMeta(inputEl.form);
       if (inputEl.getAttribute(this.binding("change"))) {
-        formData = serializeForm(inputEl.form, { _target: opts._target }, [inputEl.name]);
+        formData = serializeForm(inputEl.form, __spreadValues({ _target: opts._target }, meta), [inputEl.name]);
       } else {
-        formData = serializeForm(inputEl.form, { _target: opts._target });
+        formData = serializeForm(inputEl.form, __spreadValues({ _target: opts._target }, meta));
       }
       if (dom_default.isUploadInput(inputEl) && inputEl.files && inputEl.files.length > 0) {
         LiveUploader.trackFiles(inputEl, Array.from(inputEl.files));
@@ -2979,7 +3323,7 @@ within:
         }
       });
     }
-    pushFormSubmit(formEl, targetCtx, phxEvent, opts, onReply) {
+    disableForm(formEl, opts = {}) {
       let filterIgnored = (el) => {
         let userIgnored = closestPhxBinding(el, `${this.binding(PHX_UPDATE)}=ignore`, el.form);
         return !(userIgnored || closestPhxBinding(el, "data-phx-update=ignore", el.form));
@@ -2989,36 +3333,38 @@ within:
       };
       let filterButton = (el) => el.tagName == "BUTTON";
       let filterInput = (el) => ["INPUT", "TEXTAREA", "SELECT"].includes(el.tagName);
-      let refGenerator = () => {
-        let formElements = Array.from(formEl.elements);
-        let disables = formElements.filter(filterDisables);
-        let buttons = formElements.filter(filterButton).filter(filterIgnored);
-        let inputs = formElements.filter(filterInput).filter(filterIgnored);
-        buttons.forEach((button) => {
-          button.setAttribute(PHX_DISABLED, button.disabled);
-          button.disabled = true;
-        });
-        inputs.forEach((input) => {
-          input.setAttribute(PHX_READONLY, input.readOnly);
-          input.readOnly = true;
-          if (input.files) {
-            input.setAttribute(PHX_DISABLED, input.disabled);
-            input.disabled = true;
-          }
-        });
-        formEl.setAttribute(this.binding(PHX_PAGE_LOADING), "");
-        return this.putRef([formEl].concat(disables).concat(buttons).concat(inputs), "submit", opts);
-      };
+      let formElements = Array.from(formEl.elements);
+      let disables = formElements.filter(filterDisables);
+      let buttons = formElements.filter(filterButton).filter(filterIgnored);
+      let inputs = formElements.filter(filterInput).filter(filterIgnored);
+      buttons.forEach((button) => {
+        button.setAttribute(PHX_DISABLED, button.disabled);
+        button.disabled = true;
+      });
+      inputs.forEach((input) => {
+        input.setAttribute(PHX_READONLY, input.readOnly);
+        input.readOnly = true;
+        if (input.files) {
+          input.setAttribute(PHX_DISABLED, input.disabled);
+          input.disabled = true;
+        }
+      });
+      formEl.setAttribute(this.binding(PHX_PAGE_LOADING), "");
+      return this.putRef([formEl].concat(disables).concat(buttons).concat(inputs), "submit", opts);
+    }
+    pushFormSubmit(formEl, targetCtx, phxEvent, submitter, opts, onReply) {
+      let refGenerator = () => this.disableForm(formEl, opts);
       let cid = this.targetComponentID(formEl, targetCtx);
       if (LiveUploader.hasUploadsInProgress(formEl)) {
         let [ref, _els] = refGenerator();
-        let push = () => this.pushFormSubmit(formEl, targetCtx, phxEvent, opts, onReply);
+        let push = () => this.pushFormSubmit(formEl, submitter, targetCtx, phxEvent, opts, onReply);
         return this.scheduleSubmit(formEl, ref, opts, push);
       } else if (LiveUploader.inputsAwaitingPreflight(formEl).length > 0) {
         let [ref, els] = refGenerator();
         let proxyRefGen = () => [ref, els, opts];
         this.uploadFiles(formEl, targetCtx, ref, cid, (_uploads) => {
-          let formData = serializeForm(formEl, {});
+          let meta = this.extractMeta(formEl);
+          let formData = serializeForm(formEl, __spreadValues({ submitter }, meta));
           this.pushWithReply(proxyRefGen, "event", {
             type: "form",
             event: phxEvent,
@@ -3026,8 +3372,9 @@ within:
             cid
           }, onReply);
         });
-      } else {
-        let formData = serializeForm(formEl, {});
+      } else if (!formEl.hasAttribute(PHX_REF)) {
+        let meta = this.extractMeta(formEl);
+        let formData = serializeForm(formEl, __spreadValues({ submitter }, meta));
         this.pushWithReply(refGenerator, "event", {
           type: "form",
           event: phxEvent,
@@ -3086,7 +3433,9 @@ within:
     }
     pushFormRecovery(form, newCid, callback) {
       this.liveSocket.withinOwners(form, (view, targetCtx) => {
-        let input = form.elements[0];
+        let input = Array.from(form.elements).find((el) => {
+          return dom_default.isFormInput(el) && el.type !== "hidden" && !el.hasAttribute(this.binding("change"));
+        });
         let phxEvent = form.getAttribute(this.binding(PHX_AUTO_RECOVER)) || form.getAttribute(this.binding("change"));
         js_default.exec("change", phxEvent, view, input, ["push", { _target: input.name, newCid, callback }]);
       });
@@ -3126,7 +3475,7 @@ within:
         if (newForm) {
           return [form, newForm, this.targetComponentID(newForm)];
         } else {
-          return [form, null, null];
+          return [form, form, this.targetComponentID(form)];
         }
       }).filter(([form, newForm, newCid]) => newForm);
     }
@@ -3150,14 +3499,16 @@ within:
       }
     }
     ownsElement(el) {
-      return el.getAttribute(PHX_PARENT_ID) === this.id || maybe(el.closest(PHX_VIEW_SELECTOR), (node) => node.id) === this.id;
+      let parentViewEl = el.closest(PHX_VIEW_SELECTOR);
+      return el.getAttribute(PHX_PARENT_ID) === this.id || parentViewEl && parentViewEl.id === this.id || !parentViewEl && this.isDead;
     }
-    submitForm(form, targetCtx, phxEvent, opts = {}) {
+    submitForm(form, targetCtx, phxEvent, submitter, opts = {}) {
       dom_default.putPrivate(form, PHX_HAS_SUBMITTED, true);
       let phxFeedback = this.liveSocket.binding(PHX_FEEDBACK_FOR);
       let inputs = Array.from(form.elements);
+      inputs.forEach((input) => dom_default.putPrivate(input, PHX_HAS_SUBMITTED, true));
       this.liveSocket.blurActiveElement(this);
-      this.pushFormSubmit(form, targetCtx, phxEvent, opts, () => {
+      this.pushFormSubmit(form, targetCtx, phxEvent, submitter, opts, () => {
         inputs.forEach((input) => dom_default.showError(input, phxFeedback));
         this.liveSocket.restorePreviouslyActiveFocus();
       });
@@ -3201,6 +3552,7 @@ within:
       this.hooks = opts.hooks || {};
       this.uploaders = opts.uploaders || {};
       this.loaderTimeout = opts.loaderTimeout || LOADER_TIMEOUT;
+      this.reloadWithJitterTimer = null;
       this.maxReloads = opts.maxReloads || MAX_RELOADS;
       this.reloadJitterMin = opts.reloadJitterMin || RELOAD_JITTER_MIN;
       this.reloadJitterMax = opts.reloadJitterMax || RELOAD_JITTER_MAX;
@@ -3263,7 +3615,12 @@ within:
         if (this.joinRootViews()) {
           this.bindTopLevelEvents();
           this.socket.connect();
+        } else if (this.main) {
+          this.socket.connect();
+        } else {
+          this.bindTopLevelEvents({ dead: true });
         }
+        this.joinDeadView();
       };
       if (["complete", "loaded", "interactive"].indexOf(document.readyState) >= 0) {
         doConnect();
@@ -3272,10 +3629,27 @@ within:
       }
     }
     disconnect(callback) {
+      clearTimeout(this.reloadWithJitterTimer);
       this.socket.disconnect(callback);
+    }
+    replaceTransport(transport) {
+      clearTimeout(this.reloadWithJitterTimer);
+      this.socket.replaceTransport(transport);
+      this.connect();
     }
     execJS(el, encodedJS, eventType = null) {
       this.owner(el, (view) => js_default.exec(eventType, encodedJS, view, el));
+    }
+    unload() {
+      if (this.unloaded) {
+        return;
+      }
+      if (this.main && this.isConnected()) {
+        this.log(this.main, "socket", () => ["disconnect for page nav"]);
+      }
+      this.unloaded = true;
+      this.destroyAllViews();
+      this.disconnect();
     }
     triggerDOM(kind, args) {
       this.domCallbacks[kind](...args);
@@ -3311,7 +3685,6 @@ within:
         if (!latency) {
           cb(data);
         } else {
-          console.log(`simulating ${latency}ms of latency from server to client`);
           setTimeout(() => cb(data), latency);
         }
       });
@@ -3332,7 +3705,6 @@ within:
           return push();
         }
       }
-      console.log(`simulating ${latency}ms of latency from client to server`);
       let fakePush = {
         receives: [],
         receive(kind, cb) {
@@ -3348,18 +3720,24 @@ within:
       return fakePush;
     }
     reloadWithJitter(view, log) {
-      view.destroy();
+      clearTimeout(this.reloadWithJitterTimer);
       this.disconnect();
       let minMs = this.reloadJitterMin;
       let maxMs = this.reloadJitterMax;
       let afterMs = Math.floor(Math.random() * (maxMs - minMs + 1)) + minMs;
       let tries = browser_default.updateLocal(this.localStorage, window.location.pathname, CONSECUTIVE_RELOADS, 0, (count) => count + 1);
-      log ? log() : this.log(view, "join", () => [`encountered ${tries} consecutive reloads`]);
       if (tries > this.maxReloads) {
-        this.log(view, "join", () => [`exceeded ${this.maxReloads} consecutive reloads. Entering failsafe mode`]);
         afterMs = this.failsafeJitter;
       }
-      setTimeout(() => {
+      this.reloadWithJitterTimer = setTimeout(() => {
+        if (view.isDestroyed() || view.isConnected()) {
+          return;
+        }
+        view.destroy();
+        log ? log() : this.log(view, "join", () => [`encountered ${tries} consecutive reloads`]);
+        if (tries > this.maxReloads) {
+          this.log(view, "join", () => [`exceeded ${this.maxReloads} consecutive reloads. Entering failsafe mode`]);
+        }
         if (this.hasPendingLink()) {
           window.location = this.pendingLink;
         } else {
@@ -3385,6 +3763,18 @@ within:
     channel(topic, params) {
       return this.socket.channel(topic, params);
     }
+    joinDeadView() {
+      let body = document.body;
+      if (body && !this.isPhxView(body) && !this.isPhxView(document.firstElementChild)) {
+        let view = this.newRootView(body);
+        view.setHref(this.getHref());
+        view.joinDead();
+        if (!this.main) {
+          this.main = view;
+        }
+        window.requestAnimationFrame(() => view.execNewMounted());
+      }
+    }
     joinRootViews() {
       let rootsFound = false;
       dom_default.all(document, `${PHX_VIEW_SELECTOR}:not([${PHX_PARENT_ID}])`, (rootEl) => {
@@ -3392,7 +3782,7 @@ within:
           let view = this.newRootView(rootEl);
           view.setHref(this.getHref());
           view.join();
-          if (rootEl.getAttribute(PHX_MAIN)) {
+          if (rootEl.hasAttribute(PHX_MAIN)) {
             this.main = view;
           }
         }
@@ -3401,15 +3791,16 @@ within:
       return rootsFound;
     }
     redirect(to, flash) {
-      this.disconnect();
+      this.unload();
       browser_default.redirect(to, flash);
     }
     replaceMain(href, flash, callback = null, linkRef = this.setPendingLink(href)) {
+      let liveReferer = this.currentLocation.href;
       this.outgoingMainEl = this.outgoingMainEl || this.main.el;
       let newMainEl = dom_default.cloneNode(this.outgoingMainEl, "");
       this.main.showLoader(this.loaderTimeout);
       this.main.destroy();
-      this.main = this.newRootView(newMainEl, flash);
+      this.main = this.newRootView(newMainEl, flash, liveReferer);
       this.main.setRedirect(href);
       this.transitionRemoves();
       this.main.join((joinCount, onDone) => {
@@ -3418,7 +3809,7 @@ within:
             dom_default.findPhxSticky(document).forEach((el) => newMainEl.appendChild(el));
             this.outgoingMainEl.replaceWith(newMainEl);
             this.outgoingMainEl = null;
-            callback && callback();
+            callback && requestAnimationFrame(callback);
             onDone();
           });
         }
@@ -3428,16 +3819,14 @@ within:
       let removeAttr = this.binding("remove");
       elements = elements || dom_default.all(document, `[${removeAttr}]`);
       elements.forEach((el) => {
-        if (document.body.contains(el)) {
-          this.execJS(el, el.getAttribute(removeAttr), "remove");
-        }
+        this.execJS(el, el.getAttribute(removeAttr), "remove");
       });
     }
     isPhxView(el) {
       return el.getAttribute && el.getAttribute(PHX_SESSION) !== null;
     }
-    newRootView(el, flash) {
-      let view = new View(el, this, null, flash);
+    newRootView(el, flash, liveReferer) {
+      let view = new View(el, this, null, flash, liveReferer);
       this.roots[view.id] = view;
       return view;
     }
@@ -3462,6 +3851,7 @@ within:
         this.roots[id].destroy();
         delete this.roots[id];
       }
+      this.main = null;
     }
     destroyViewByEl(el) {
       let root = this.getRootById(el.getAttribute(PHX_ROOT_ID));
@@ -3510,14 +3900,17 @@ within:
         this.prevActive.blur();
       }
     }
-    bindTopLevelEvents() {
+    bindTopLevelEvents({ dead } = {}) {
       if (this.boundTopLevelEvents) {
         return;
       }
       this.boundTopLevelEvents = true;
       this.socket.onClose((event) => {
+        if (event && event.code === 1001) {
+          return this.unload();
+        }
         if (event && event.code === 1e3 && this.main) {
-          this.reloadWithJitter(this.main);
+          return this.reloadWithJitter(this.main);
         }
       });
       document.body.addEventListener("click", function() {
@@ -3529,9 +3922,13 @@ within:
           window.location.reload();
         }
       }, true);
-      this.bindNav();
+      if (!dead) {
+        this.bindNav();
+      }
       this.bindClicks();
-      this.bindForms();
+      if (!dead) {
+        this.bindForms();
+      }
       this.bind({ keyup: "keyup", keydown: "keydown" }, (e, type, view, targetEl, phxEvent, eventTarget) => {
         let matchKey = targetEl.getAttribute(this.binding(PHX_KEY));
         let pressedKey = e.key && e.key.toLowerCase();
@@ -3564,7 +3961,7 @@ within:
         if (!dropTarget || dropTarget.disabled || files.length === 0 || !(dropTarget.files instanceof FileList)) {
           return;
         }
-        LiveUploader.trackFiles(dropTarget, files);
+        LiveUploader.trackFiles(dropTarget, files, e.dataTransfer);
         dropTarget.dispatchEvent(new Event("input", { bubbles: true }));
       });
       this.on(PHX_TRACK_UPLOADS, (e) => {
@@ -3609,7 +4006,7 @@ within:
           let windowBinding = this.binding(`window-${event}`);
           let targetPhxEvent = e.target.getAttribute && e.target.getAttribute(binding);
           if (targetPhxEvent) {
-            this.debounce(e.target, e, () => {
+            this.debounce(e.target, e, browserEventName, () => {
               this.withinOwners(e.target, (view) => {
                 callback(e, event, view, e.target, targetPhxEvent, null);
               });
@@ -3617,7 +4014,7 @@ within:
           } else {
             dom_default.all(document, `[${windowBinding}]`, (el) => {
               let phxEvent = el.getAttribute(windowBinding);
-              this.debounce(el, e, () => {
+              this.debounce(el, e, browserEventName, () => {
                 this.withinOwners(el, (view) => {
                   callback(e, event, view, el, phxEvent, "window");
                 });
@@ -3628,7 +4025,7 @@ within:
       }
     }
     bindClicks() {
-      window.addEventListener("mousedown", (e) => this.clickStartedAtTarget = e.target);
+      window.addEventListener("click", (e) => this.clickStartedAtTarget = e.target);
       this.bindClick("click", "click", false);
       this.bindClick("mousedown", "capture-click", true);
     }
@@ -3646,12 +4043,19 @@ within:
         }
         let phxEvent = target && target.getAttribute(click);
         if (!phxEvent) {
+          let href = e.target instanceof HTMLAnchorElement ? e.target.getAttribute("href") : null;
+          if (!capture && href !== null && !dom_default.wantsNewTab(e) && dom_default.isNewPageHref(href, window.location)) {
+            this.unload();
+          }
           return;
         }
         if (target.getAttribute("href") === "#") {
           e.preventDefault();
         }
-        this.debounce(target, e, () => {
+        if (target.hasAttribute(PHX_REF)) {
+          return;
+        }
+        this.debounce(target, e, "click", () => {
           this.withinOwners(target, (view) => {
             js_default.exec("click", phxEvent, view, target, ["push", { data: this.eventMeta("click", e, target) }]);
           });
@@ -3693,17 +4097,15 @@ within:
         let href = window.location.href;
         this.requestDOMUpdate(() => {
           if (this.main.isConnected() && (type === "patch" && id === this.main.id)) {
-            this.main.pushLinkPatch(href, null);
+            this.main.pushLinkPatch(href, null, () => {
+              this.maybeScroll(scroll);
+            });
           } else {
             this.replaceMain(href, null, () => {
               if (root) {
                 this.replaceRootHistory();
               }
-              if (typeof scroll === "number") {
-                setTimeout(() => {
-                  window.scrollTo(0, scroll);
-                }, 0);
-              }
+              this.maybeScroll(scroll);
             });
           }
         });
@@ -3711,8 +4113,7 @@ within:
       window.addEventListener("click", (e) => {
         let target = closestPhxBinding(e.target, PHX_LIVE_LINK);
         let type = target && target.getAttribute(PHX_LIVE_LINK);
-        let wantsNewTab = e.metaKey || e.ctrlKey || e.button === 1;
-        if (!type || !this.isConnected() || !this.main || wantsNewTab) {
+        if (!type || !this.isConnected() || !this.main || dom_default.wantsNewTab(e)) {
           return;
         }
         let href = target.href;
@@ -3730,8 +4131,19 @@ within:
           } else {
             throw new Error(`expected ${PHX_LIVE_LINK} to be "patch" or "redirect", got: ${type}`);
           }
+          let phxClick = target.getAttribute(this.binding("click"));
+          if (phxClick) {
+            this.requestDOMUpdate(() => this.execJS(target, phxClick, "click"));
+          }
         });
       }, false);
+    }
+    maybeScroll(scroll) {
+      if (typeof scroll === "number") {
+        requestAnimationFrame(() => {
+          window.scrollTo(0, scroll);
+        });
+      }
     }
     dispatchEvent(event, payload = {}) {
       dom_default.dispatchEvent(window, `phx:${event}`, { detail: payload });
@@ -3745,6 +4157,9 @@ within:
       return callback ? callback(done) : done;
     }
     pushHistoryPatch(href, linkState, targetEl) {
+      if (!this.isConnected()) {
+        return browser_default.redirect(href);
+      }
       this.withPageLoading({ to: href, kind: "patch" }, (done) => {
         this.main.pushLinkPatch(href, targetEl, (linkRef) => {
           this.historyPatch(href, linkState, linkRef);
@@ -3760,6 +4175,13 @@ within:
       this.registerNewLocation(window.location);
     }
     historyRedirect(href, linkState, flash) {
+      if (!this.isConnected()) {
+        return browser_default.redirect(href, flash);
+      }
+      if (/^\/$|^\/[^\/]+.*$/.test(href)) {
+        let { protocol, host } = window.location;
+        href = `${protocol}//${host}${href}`;
+      }
       let scroll = window.scrollY;
       this.withPageLoading({ to: href, kind: "redirect" }, (done) => {
         this.replaceMain(href, flash, () => {
@@ -3783,15 +4205,36 @@ within:
     }
     bindForms() {
       let iterations = 0;
+      let externalFormSubmitted = false;
+      this.on("submit", (e) => {
+        let phxSubmit = e.target.getAttribute(this.binding("submit"));
+        let phxChange = e.target.getAttribute(this.binding("change"));
+        if (!externalFormSubmitted && phxChange && !phxSubmit) {
+          externalFormSubmitted = true;
+          e.preventDefault();
+          this.withinOwners(e.target, (view) => {
+            view.disableForm(e.target);
+            window.requestAnimationFrame(() => {
+              if (dom_default.isUnloadableFormSubmit(e)) {
+                this.unload();
+              }
+              e.target.submit();
+            });
+          });
+        }
+      }, true);
       this.on("submit", (e) => {
         let phxEvent = e.target.getAttribute(this.binding("submit"));
         if (!phxEvent) {
+          if (dom_default.isUnloadableFormSubmit(e)) {
+            this.unload();
+          }
           return;
         }
         e.preventDefault();
         e.target.disabled = true;
         this.withinOwners(e.target, (view) => {
-          js_default.exec("submit", phxEvent, view, e.target, ["push", {}]);
+          js_default.exec("submit", phxEvent, view, e.target, ["push", { submitter: e.submitter }]);
         });
       }, false);
       for (let type of ["change", "input"]) {
@@ -3815,7 +4258,7 @@ within:
             return;
           }
           dom_default.putPrivate(input, "prev-iteration", { at: currentIterations, type });
-          this.debounce(input, e, () => {
+          this.debounce(input, e, type, () => {
             this.withinOwners(dispatcher, (view) => {
               dom_default.putPrivate(input, PHX_HAS_FOCUSED, true);
               if (!dom_default.isTextualInput(input)) {
@@ -3826,13 +4269,29 @@ within:
           });
         }, false);
       }
+      this.on("reset", (e) => {
+        let form = e.target;
+        dom_default.resetForm(form, this.binding(PHX_FEEDBACK_FOR));
+        let input = Array.from(form.elements).find((el) => el.type === "reset");
+        window.requestAnimationFrame(() => {
+          input.dispatchEvent(new Event("input", { bubbles: true, cancelable: false }));
+        });
+      });
     }
-    debounce(el, event, callback) {
+    debounce(el, event, eventType, callback) {
+      if (eventType === "blur" || eventType === "focusout") {
+        return callback();
+      }
       let phxDebounce = this.binding(PHX_DEBOUNCE);
       let phxThrottle = this.binding(PHX_THROTTLE);
       let defaultDebounce = this.defaults.debounce.toString();
       let defaultThrottle = this.defaults.throttle.toString();
-      dom_default.debounce(el, event, phxDebounce, defaultDebounce, phxThrottle, defaultThrottle, callback);
+      this.withinOwners(el, (view) => {
+        let asyncFilter = () => !view.isDestroyed() && document.body.contains(el);
+        dom_default.debounce(el, event, phxDebounce, defaultDebounce, phxThrottle, defaultThrottle, asyncFilter, () => {
+          callback();
+        });
+      });
     }
     silenceEvents(callback) {
       this.silenced = true;
@@ -3851,11 +4310,10 @@ within:
     constructor() {
       this.transitions = new Set();
       this.pendingOps = [];
-      this.reset();
     }
     reset() {
       this.transitions.forEach((timer) => {
-        cancelTimeout(timer);
+        clearTimeout(timer);
         this.transitions.delete(timer);
       });
       this.flushPendingOps();
@@ -3872,9 +4330,7 @@ within:
       let timer = setTimeout(() => {
         this.transitions.delete(timer);
         onDone();
-        if (this.size() === 0) {
-          this.flushPendingOps();
-        }
+        this.flushPendingOps();
       }, time);
       this.transitions.add(timer);
     }
@@ -3885,8 +4341,14 @@ within:
       return this.transitions.size;
     }
     flushPendingOps() {
-      this.pendingOps.forEach((op) => op());
-      this.pendingOps = [];
+      if (this.size() > 0) {
+        return;
+      }
+      let op = this.pendingOps.shift();
+      if (op) {
+        op();
+        this.flushPendingOps();
+      }
     }
   };
   return phoenix_live_view_exports;

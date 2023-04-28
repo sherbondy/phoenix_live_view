@@ -1,57 +1,62 @@
 # Form bindings
 
-## A note about form helpers
-
-LiveView works with the existing `Phoenix.HTML` form helpers.
-If you want to use helpers such as [`text_input/2`](`Phoenix.HTML.Form.text_input/2`),
-etc. be sure to `use Phoenix.HTML` at the top of your LiveView.
-If your application was generated with Phoenix v1.6, then `mix phx.new`
-automatically uses `Phoenix.HTML` when you `use MyAppWeb, :live_view` or
-`use MyAppWeb, :live_component` in your modules.
-
-Using the generated `:live_view` and `:live_component` helpers will also
-`import MyAppWeb.ErrorHelpers`, a module generated as part of your application
-where `error_tag/2` resides (usually located at `lib/my_app_web/views/error_helpers.ex`).
-You are welcome to change the `ErrorHelpers` module as you prefer.
-
 ## Form Events
 
 To handle form changes and submissions, use the `phx-change` and `phx-submit`
 events. In general, it is preferred to handle input changes at the form level,
 where all form fields are passed to the LiveView's callback given any
-single input change, but individual inputs may also track their own changes.
-For example, to handle real-time form validation and saving, your form would
-use both `phx-change` and `phx-submit` bindings:
+single input change. For example, to handle real-time form validation and
+saving, your form would use both `phx-change` and `phx-submit` bindings.
+Let's get started with an example:
 
-```
-<.form let={f} for={@changeset} phx-change="validate" phx-submit="save">
-  <%= label f, :username %>
-  <%= text_input f, :username %>
-  <%= error_tag f, :username %>
-
-  <%= label f, :email %>
-  <%= text_input f, :email %>
-  <%= error_tag f, :email %>
-
-  <%= submit "Save" %>
+```heex
+<.form for={@form} phx-change="validate" phx-submit="save">
+  <.input type="text" field={@form[:username]} />
+  <.input type="email" field={@form[:email]} />
+  <button>Save</button>
 </.form>
 ```
 
-Next, your LiveView picks up the events in `handle_event` callbacks:
+`.form` is the function component defined in `Phoenix.Component.form/1`,
+we recommend reading its documentation for more details on how it works
+and all supported options. `.form` expects a `@form` assign, which can
+be created from a changeset or user parameters via `Phoenix.Component.to_form/1`.
+
+`input/1` is a function component for rendering inputs, most often
+defined in your own application, often encapsulating labelling,
+error handling, and more. Here is a simple version to get started with:
+
+    attr :field, Phoenix.HTML.FormField
+    attr :rest, include: ~w(type)
+    def input(assigns) do
+      ~H"""
+      <input id={@field.id} name={@field.name} value={@field.value} {@rest} />
+      """
+    end
+
+> ### The `CoreComponents` module {: .info}
+>
+> If your application was generated with Phoenix v1.7, then `mix phx.new`
+> automatically imports many ready-to-use function components, such as
+> `.input` component with built-in features and styles.
+
+With the form rendered, your LiveView picks up the events in `handle_event`
+callbacks, to validate and attempt to save the parameter accordingly:
 
     def render(assigns) ...
 
     def mount(_params, _session, socket) do
-      {:ok, assign(socket, %{changeset: Accounts.change_user(%User{})})}
+      {:ok, assign(socket, form: to_form(Accounts.change_user(%User{}))}
     end
 
     def handle_event("validate", %{"user" => params}, socket) do
-      changeset =
+      form =
         %User{}
         |> Accounts.change_user(params)
         |> Map.put(:action, :insert)
+        |> to_form()
 
-      {:noreply, assign(socket, changeset: changeset)}
+      {:noreply, assign(socket, form: form)}
     end
 
     def handle_event("save", %{"user" => user_params}, socket) do
@@ -60,16 +65,16 @@ Next, your LiveView picks up the events in `handle_event` callbacks:
           {:noreply,
            socket
            |> put_flash(:info, "user created")
-           |> redirect(to: Routes.user_path(MyAppWeb.Endpoint, MyAppWeb.User.ShowView, user))}
+           |> redirect(to: ~p"/users/#{user}")}
 
         {:error, %Ecto.Changeset{} = changeset} ->
-          {:noreply, assign(socket, changeset: changeset)}
+          {:noreply, assign(socket, form: to_form(changeset))}
       end
     end
 
 The validate callback simply updates the changeset based on all form input
-values, then assigns the new changeset to the socket. If the changeset
-changes, such as generating new errors, [`render/1`](`c:Phoenix.LiveView.render/1`)
+values, then convert the changeset to a form and assign it to the socket.
+If the form changes, such as generating new errors, [`render/1`](`c:Phoenix.LiveView.render/1`)
 is invoked and the form is re-rendered.
 
 Likewise for `phx-submit` bindings, the same callback is invoked and
@@ -83,10 +88,9 @@ a different component. This can be accomplished by annotating the input itself
 with `phx-change`, for example:
 
 ```
-<.form let={f} for={@changeset} phx-change="validate" phx-submit="save">
+<.form for={@form} phx-change="validate" phx-submit="save">
   ...
-  <%= label f, :county %>
-  <%= text_input f, :email, phx_change: "email_changed", phx_target: @myself %>
+  <.input field={@form[:email]}  phx-change="email_changed" phx-target={@myself} />
 </.form>
 ```
 
@@ -109,27 +113,40 @@ Failing to add the `phx-feedback-for` attribute will result in displaying error
 messages for form fields that the user has not changed yet (e.g. required
 fields further down on the page).
 
-For example, your `MyAppWeb.ErrorHelpers` may use this function:
+For example, your `MyAppWeb.CoreComponents` may use this function:
 
-    def error_tag(form, field) do
-      form.errors
-      |> Keyword.get_values(field)
-      |> Enum.map(fn error ->
-        content_tag(:span, translate_error(error),
-          class: "invalid-feedback",
-          phx_feedback_for: input_name(form, field)
-        )
-      end)
+    def input(assigns) do
+      ~H"""
+      <div phx-feedback-for={@name}>
+        <input
+          type={@type}
+          name={@name}
+          id={@id || @name}
+          value={Phoenix.HTML.Form.normalize_value(@type, @value)}
+          class={[
+            "phx-no-feedback:border-zinc-300 phx-no-feedback:focus:border-zinc-400",
+            "border-zinc-300 focus:border-zinc-400 focus:ring-zinc-800/5",
+          ]}
+          {@rest}
+        />
+        <.error :for={msg <- @errors}><%%= msg %></.error>
+      </div>
+      """
+    end
+
+    def error(assigns) do
+      ~H"""
+      <p class="phx-no-feedback:hidden">
+        <Heroicons.exclamation_circle mini class="mt-0.5 h-5 w-5 flex-none fill-rose-500" />
+        <%= render_slot(@inner_block) %>
+      </p>
+      """
     end
 
 Now, any DOM container with the `phx-feedback-for` attribute will receive a
 `phx-no-feedback` class in cases where the form fields has yet to receive
-user input/focus. The following css rules are generated in new projects
-to hide the errors:
-
-    .phx-no-feedback.invalid-feedback, .phx-no-feedback .invalid-feedback {
-      display: none;
-    }
+user input/focus. Using new CSS rules or tailwindcss variants allows you
+errors to be shown, hidden, and styled as feedback changes.
 
 ## Number inputs
 
@@ -162,10 +179,19 @@ password field values are not reused when rendering a password input tag. This
 requires explicitly setting the `:value` in your markup, for example:
 
 ```heex
-<%= password_input f, :password, value: input_value(f, :password) %>
-<%= password_input f, :password_confirmation, value: input_value(f, :password_confirmation) %>
-<%= error_tag f, :password %>
-<%= error_tag f, :password_confirmation %>
+<.input field={f[:password]} value={input_value(f[:password].value)} />
+<.input field={f[:password_confirmation]} value={input_value(f[:password_confirmation].value)} />
+```
+
+## Nested inputs
+
+Nested inputs are handled using `.inputs_for` function component. By default
+it will add the necessary hidden input fields for tracking ids of Ecto associations.
+
+```heex
+<.inputs_for :let={fp} field={f[:friends]}>
+  <.input field={fp[:name]} type="text">
+</.inputs_for>
 ```
 
 ## File inputs
@@ -176,12 +202,12 @@ attribute:
 
 ```heex
 <div class="container" phx-drop-target={@uploads.avatar.ref}>
-    ...
-    <%= live_file_input @uploads.avatar %>
+  ...
+  <.live_file_input upload={@uploads.avatar} />
 </div>
 ```
 
-See `Phoenix.LiveView.Helpers.live_file_input/2` for more.
+See `Phoenix.Component.live_file_input/1` for more.
 
 ## Submitting the form action over HTTP
 
@@ -193,9 +219,9 @@ Plug session mutation. For example, in your LiveView template you can
 annotate the `phx-trigger-action` with a boolean assign:
 
 ```heex
-<.form let={f} for={@changeset}
+<.form :let={f} for={@changeset}
   action={Routes.reset_password_path(@socket, :create)}
-  phx-submit="save",
+  phx-submit="save"
   phx-trigger-action={@trigger_submit}>
 ```
 
@@ -216,10 +242,11 @@ Once `phx-trigger-action` is true, LiveView disconnects and then submits the for
 
 ## Recovery following crashes or disconnects
 
-By default, all forms marked with `phx-change` will recover input values
-automatically after the user has reconnected or the LiveView has remounted
-after a crash. This is achieved by the client triggering the same `phx-change`
-to the server as soon as the mount has been completed.
+By default, all forms marked with `phx-change` and having `id`
+attribute will recover input values automatically after the user has
+reconnected or the LiveView has remounted after a crash. This is
+achieved by the client triggering the same `phx-change` to the server
+as soon as the mount has been completed.
 
 **Note:** if you want to see form recovery working in development, please
 make sure to disable live reloading in development by commenting out the
@@ -237,7 +264,7 @@ to trigger for recovery, which will receive the form params as usual. For exampl
 imagine a LiveView wizard form where the form is stateful and built based on what
 step the user is on and by prior selections:
 
-    <form phx-change="validate_wizard_step" phx-auto-recover="recover_wizard">
+    <form id="wizard" phx-change="validate_wizard_step" phx-auto-recover="recover_wizard">
 
 On the server, the `"validate_wizard_step"` event is only concerned with the
 current client form data, but the server maintains the entire state of the wizard.
@@ -256,6 +283,29 @@ above, which would wire up to the following server callbacks in your LiveView:
 
 To forgo automatic form recovery, set `phx-auto-recover="ignore"`.
 
+## Resetting Forms
+
+To reset a LiveView form, you can use the standard `type="reset"` on a
+form button or input. When clicked, the form inputs will be reset to their
+original values, and Phoenix will hide errors for `phx-fedback-for` elements.
+After the form is reset, a `phx-change` event is emitted with the `_target` param
+containing the reset `name`. For example, the following element:
+
+    <form phx-change="changed">
+      ...
+      <button type="reset" name="reset">Reset</button>
+    </form>
+
+Can be handled on the server differently from your regular change function:
+
+    def handle_event("changed", %{"_target" => ["reset"]} = params, socket) do
+      # handle form reset
+    end
+
+    def handle_event("changed", params, socket) do
+      # handle regular form change
+    end
+
 ## JavaScript client specifics
 
 The JavaScript client is always the source of truth for current input values.
@@ -267,7 +317,7 @@ errors, or additive UX around the user's input values as they fill out a form.
 For these use cases, the `phx-change` input does not concern itself with disabling
 input editing while an event to the server is in flight. When a `phx-change` event
 is sent to the server, the input tag and parent form tag receive the
-`phx-change-loading` css class, then the payload is pushed to the server with a
+`phx-change-loading` CSS class, then the payload is pushed to the server with a
 `"_target"` param in the root payload containing the keyspace of the input name
 which triggered the change event.
 
@@ -330,3 +380,30 @@ You can show and hide content with the following markup:
 Additionally, we strongly recommend including a unique HTML "id" attribute on the form.
 When DOM siblings change, elements without an ID will be replaced rather than moved,
 which can cause issues such as form fields losing focus.
+
+## Triggering `phx-` form events with JavaScript
+
+Often it is desirable to trigger an event on a DOM element without explicit
+user interaction on the element. For example, a custom form element such as a
+date picker or custom select input which utilizes a hidden input element to
+store the selected state.
+
+In these cases, the event functions on the DOM API can be used, for example
+to trigger a `phx-change` event:
+
+```
+document.getElementById("my-select").dispatchEvent(
+  new Event("input", {bubbles: true})
+)
+```
+
+When using a client hook, `this.el` can be used to determine the element as
+outlined in the "Client hooks" documentation.
+
+It is also possible to trigger a `phx-submit` using a "submit" event:
+
+```
+document.getElementById("my-form").dispatchEvent(
+  new Event("submit", {bubbles: true, cancelable: true})
+)
+```

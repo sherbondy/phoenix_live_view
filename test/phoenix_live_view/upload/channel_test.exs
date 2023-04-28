@@ -1,10 +1,10 @@
 defmodule Phoenix.LiveView.UploadChannelTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
   require Phoenix.ChannelTest
 
   import Phoenix.LiveViewTest
 
-  alias Phoenix.LiveView
+  alias Phoenix.{Component, LiveView}
   alias Phoenix.LiveViewTest.{UploadClient, UploadLive, UploadLiveWithComponent}
 
   @endpoint Phoenix.LiveViewTest.Endpoint
@@ -38,6 +38,7 @@ defmodule Phoenix.LiveView.UploadChannelTest do
       Enum.into(opts, %{
         last_modified: 1_594_171_879_000,
         name: "myfile#{i}.jpeg",
+        relative_path: "./myfile#{i}.jpeg",
         content: String.duplicate("0", 100),
         size: 1_396_009,
         type: "image/jpeg"
@@ -69,7 +70,7 @@ defmodule Phoenix.LiveView.UploadChannelTest do
             {:ok, entry.client_name}
           end)
 
-        LiveView.update(socket, :consumed, fn consumed -> [name] ++ consumed end)
+        Phoenix.Component.update(socket, :consumed, fn consumed -> [name] ++ consumed end)
       else
         socket
       end
@@ -78,15 +79,7 @@ defmodule Phoenix.LiveView.UploadChannelTest do
   end
 
   setup_all do
-    ExUnit.CaptureLog.capture_log(fn ->
-      {:ok, _} = @endpoint.start_link()
-
-      {:ok, _} =
-        Supervisor.start_link([Phoenix.PubSub.child_spec(name: Phoenix.LiveView.PubSub)],
-          strategy: :one_for_one
-        )
-    end)
-
+    start_supervised!(Phoenix.PubSub.child_spec(name: Phoenix.LiveView.PubSub))
     :ok
   end
 
@@ -363,7 +356,7 @@ defmodule Phoenix.LiveView.UploadChannelTest do
           {:reply, :ok, socket}
         end)
 
-        # Wait for the the UploadClient and UploadChannel to shutdown
+        # Wait for the UploadClient and UploadChannel to shutdown
         assert_receive {:DOWN, _ref, :process, ^avatar_pid, {:shutdown, :closed}}
         assert_receive {:DOWN, _ref, :process, ^channel_pid, {:shutdown, :closed}}
         assert_receive {:file, tmp_path, "foo.jpeg", "123"}
@@ -569,6 +562,20 @@ defmodule Phoenix.LiveView.UploadChannelTest do
         refute File.exists?(tmp_path)
       end
 
+      @tag allow: [max_entries: 1, accept: :any]
+      test "cancel_upload with invalid ref", %{lv: lv} do
+        avatar =
+          file_input(lv, "form", :avatar, [
+            %{name: "foo.jpeg", content: String.duplicate("0", 100)}
+          ])
+
+        assert UploadLive.exits_with(lv, avatar, ArgumentError, fn ->
+                 UploadLive.run(lv, fn socket ->
+                   {:reply, :ok, Phoenix.LiveView.cancel_upload(socket, :avatar, "bad_ref")}
+                 end)
+               end) =~ "no entry in upload \":avatar\" with ref \"bad_ref\""
+      end
+
       @tag allow: [max_entries: 1, chunk_size: 20, accept: :any]
       test "cancel_upload in progress", %{lv: lv} do
         avatar =
@@ -643,14 +650,14 @@ defmodule Phoenix.LiveView.UploadChannelTest do
       avatar = file_input(lv, "#upload0", :avatar, build_entries(1))
       assert render_upload(avatar, "myfile1.jpeg", 1) =~ "component:myfile1.jpeg:1%"
 
-      GenServer.call(lv.pid, {:setup, fn socket -> LiveView.assign(socket, uploads_count: 2) end})
+      GenServer.call(lv.pid, {:setup, fn socket -> Component.assign(socket, uploads_count: 2) end})
 
       GenServer.call(
         lv.pid,
         {:setup,
          fn socket ->
            run = fn component_socket ->
-             new_socket = Phoenix.LiveView.allow_upload(component_socket, :avatar, accept: :any)
+             new_socket = LiveView.allow_upload(component_socket, :avatar, accept: :any)
              {:reply, :ok, new_socket}
            end
 
@@ -731,7 +738,7 @@ defmodule Phoenix.LiveView.UploadChannelTest do
 
     @tag allow: [accept: :any]
     test "get allowed uploads from the form's target cid", %{lv: lv} do
-      GenServer.call(lv.pid, {:setup, fn socket -> LiveView.assign(socket, uploads_count: 2) end})
+      GenServer.call(lv.pid, {:setup, fn socket -> Component.assign(socket, uploads_count: 2) end})
 
       GenServer.call(
         lv.pid,

@@ -135,6 +135,7 @@ defmodule Phoenix.LiveViewTest.ClientProxy do
       ids: %{},
       pids: %{},
       replies: %{},
+      dropped_replies: %{},
       root_view: nil,
       html: root_html,
       static_path: static_path,
@@ -152,7 +153,7 @@ defmodule Phoenix.LiveViewTest.ClientProxy do
         |> maybe_put_container(resp)
         |> Map.put(:root_view, root_view)
         |> put_view(root_view, rendered)
-        |> detect_added_or_removed_children(root_view, root_html)
+        |> detect_added_or_removed_children(root_view, root_html, [])
 
       send_caller(new_state, {:ok, build_client_view(root_view), DOM.to_html(new_state.html)})
       {:ok, new_state}
@@ -298,10 +299,10 @@ defmodule Phoenix.LiveViewTest.ClientProxy do
 
           case value do
             %Upload{} = upload ->
-              {view, cids, event, %{}, upload}
+              [{view, cids, event, %{}, upload}]
 
             other ->
-              {view, cids, event, stringify(other, & &1), nil}
+              [{view, cids, event, stringify(other, & &1), nil}]
           end
 
         %Element{} = element ->
@@ -311,59 +312,70 @@ defmodule Phoenix.LiveViewTest.ClientProxy do
           with {:ok, node} <- select_node(root, element),
                :ok <- maybe_enabled(type, node, element),
                {:ok, event_or_js} <- maybe_event(type, node, element),
-               {:ok, extra} <- maybe_values(type, node, element) do
-            {event, js_values, js_target_selector} = maybe_js_event(event_or_js)
-            extra = Map.merge(extra, js_values)
+               {:ok, dom_values} <- maybe_values(type, node, element) do
+            event_or_js
+            |> maybe_js_event()
+            |> List.wrap()
+            |> Enum.map(fn {event, js_values, js_target_selector} ->
+              event_values = Map.merge(dom_values, js_values)
 
-            {values, uploads} =
-              case value do
-                %Upload{} = upload -> {extra, upload}
-                other -> {DOM.deep_merge(extra, stringify(other, & &1)), nil}
-              end
+              {values, uploads} =
+                case value do
+                  %Upload{} = upload -> {event_values, upload}
+                  other -> {DOM.deep_merge(event_values, stringify(other, & &1)), nil}
+                end
 
-            js_targets = DOM.targets_from_selector(root, js_target_selector)
-            node_targets = DOM.targets_from_node(root, node)
+              js_targets = DOM.targets_from_selector(root, js_target_selector)
+              node_targets = DOM.targets_from_node(root, node)
 
-            targets =
-              case {js_targets, node_targets} do
-                {[nil], right} -> right
-                {left, [nil]} -> left
-                {left, right} -> Enum.uniq(left ++ right)
-              end
+              targets =
+                case {js_targets, node_targets} do
+                  {[nil], right} -> right
+                  {left, [nil]} -> left
+                  {left, right} -> Enum.uniq(left ++ right)
+                end
 
-            {view, targets, event, values, uploads}
+              {view, targets, event, values, uploads}
+            end)
           end
       end
 
     case result do
-      {view, cids, event, values, upload} when is_list(cids) ->
-        last = length(cids) - 1
+      [{%ClientProxy{} = _view, _cids, _event, _values, _upload} | _] = events ->
+        last_event = length(events) - 1
 
         diffs =
-          cids
+          events
           |> Enum.with_index()
-          |> Enum.reduce(state, fn {cid, index}, acc ->
-            {type, encoded_value} = encode_event_type(type, values)
+          |> Enum.reduce(state, fn {{view, cids, event, values, upload}, event_index}, state
+                                   when is_list(cids) ->
+            last_cid = length(cids) - 1
 
-            payload =
-              maybe_put_uploads(
-                state,
-                view,
-                %{
-                  "cid" => cid,
-                  "type" => type,
-                  "event" => event,
-                  "value" => encoded_value
-                },
-                upload
-              )
+            cids
+            |> Enum.with_index()
+            |> Enum.reduce(state, fn {cid, cid_index}, acc ->
+              {type, encoded_value} = encode_event_type(type, values)
 
-            push_with_callback(acc, view, "event", payload, fn reply, state ->
-              if index == last do
-                {:noreply, render_reply(reply, from, state)}
-              else
-                {:noreply, state}
-              end
+              payload =
+                maybe_put_uploads(
+                  state,
+                  view,
+                  %{
+                    "cid" => cid,
+                    "type" => type,
+                    "event" => event,
+                    "value" => encoded_value
+                  },
+                  upload
+                )
+
+              push_with_callback(acc, view, "event", from, payload, fn reply, state ->
+                if event_index == last_event and cid_index == last_cid do
+                  {:noreply, render_reply(reply, from, state)}
+                else
+                  {:noreply, state}
+                end
+              end)
             end)
           end)
 
@@ -436,14 +448,21 @@ defmodule Phoenix.LiveViewTest.ClientProxy do
 
   def handle_info(%Phoenix.Socket.Reply{ref: ref} = reply, state) do
     case fetch_reply(state, ref) do
-      {:ok, {_pid, callback}} ->
+      {:ok, {_pid, _from, callback}} ->
         case handle_reply(state, reply) do
           {:ok, new_state} -> callback.(reply, drop_reply(new_state, ref))
           other -> other
         end
 
       :error ->
-        {:noreply, state}
+        case Map.fetch(state.dropped_replies, ref) do
+          {:ok, from} ->
+            GenServer.reply(from, {:ok, nil})
+            {:noreply, %{state | dropped_replies: Map.delete(state.dropped_replies, ref)}}
+
+          :error ->
+            {:noreply, state}
+        end
     end
   end
 
@@ -532,6 +551,7 @@ defmodule Phoenix.LiveViewTest.ClientProxy do
         state,
         view,
         "allow_upload",
+        from,
         payload,
         fn reply, state ->
           GenServer.reply(from, {:ok, reply.payload})
@@ -570,8 +590,8 @@ defmodule Phoenix.LiveViewTest.ClientProxy do
 
   defp flush_replies(state, pid) do
     Enum.reduce(state.replies, state, fn
-      {ref, {^pid, _callback}}, acc -> drop_reply(acc, ref)
-      {_ref, {_pid, _callback}}, acc -> acc
+      {ref, {^pid, _from, _callback}}, acc -> drop_reply(acc, ref)
+      {_ref, {_pid, _from, _callback}}, acc -> acc
     end)
   end
 
@@ -579,12 +599,22 @@ defmodule Phoenix.LiveViewTest.ClientProxy do
     Map.fetch(state.replies, ref)
   end
 
-  defp put_reply(state, ref, pid, callback) do
-    %{state | replies: Map.put(state.replies, ref, {pid, callback})}
+  defp put_reply(state, ref, pid, from, callback) do
+    %{state | replies: Map.put(state.replies, ref, {pid, from, callback})}
   end
 
   defp drop_reply(state, ref) do
-    %{state | replies: Map.delete(state.replies, ref)}
+    dropped_replies =
+      case Map.fetch(state.replies, ref) do
+        {:ok, {_pid, from, _callback}} -> Map.put(state.dropped_replies, ref, from)
+        :error -> state.dropped_replies
+      end
+
+    %{
+      state
+      | replies: Map.delete(state.replies, ref),
+        dropped_replies: dropped_replies
+    }
   end
 
   defp put_child(state, %ClientProxy{} = parent, id, session) do
@@ -625,23 +655,24 @@ defmodule Phoenix.LiveViewTest.ClientProxy do
           ids: Map.put(state.ids, new_view.id, new_view.topic)
       },
       view,
-      DOM.render_diff(rendered)
+      DOM.render_diff(rendered),
+      rendered.streams
     )
   end
 
-  defp patch_view(state, view, child_html) do
-    case DOM.patch_id(view.id, state.html, child_html) do
+  defp patch_view(state, view, child_html, streams) do
+    case DOM.patch_id(view.id, state.html, child_html, streams) do
       {new_html, [_ | _] = will_destroy_cids} ->
         topic = view.topic
         state = %{state | html: new_html}
         payload = %{"cids" => will_destroy_cids}
 
-        push_with_callback(state, view, "cids_will_destroy", payload, fn _, state ->
+        push_with_callback(state, view, "cids_will_destroy", nil, payload, fn _, state ->
           still_there_cids = DOM.component_ids(view.id, state.html)
           payload = %{"cids" => Enum.reject(will_destroy_cids, &(&1 in still_there_cids))}
 
           state =
-            push_with_callback(state, view, "cids_destroyed", payload, fn reply, state ->
+            push_with_callback(state, view, "cids_destroyed", nil, payload, fn reply, state ->
               cids = reply.payload.cids
               {:noreply, update_in(state.views[topic].rendered, &DOM.drop_cids(&1, cids))}
             end)
@@ -702,16 +733,16 @@ defmodule Phoenix.LiveViewTest.ClientProxy do
         new_view = %ClientProxy{view | rendered: rendered}
 
         %{state | views: Map.update!(state.views, topic, fn _ -> new_view end)}
-        |> patch_view(new_view, DOM.render_diff(rendered))
-        |> detect_added_or_removed_children(new_view, html_before)
+        |> patch_view(new_view, DOM.render_diff(rendered), rendered.streams)
+        |> detect_added_or_removed_children(new_view, html_before, rendered.streams)
 
       :error ->
         state
     end
   end
 
-  defp detect_added_or_removed_children(state, view, html_before) do
-    new_state = recursive_detect_added_or_removed_children(state, view, html_before)
+  defp detect_added_or_removed_children(state, view, html_before, streams) do
+    new_state = recursive_detect_added_or_removed_children(state, view, html_before, streams)
     {:ok, new_view} = fetch_view_by_topic(new_state, view.topic)
 
     ids_after =
@@ -729,14 +760,14 @@ defmodule Phoenix.LiveViewTest.ClientProxy do
     end)
   end
 
-  defp recursive_detect_added_or_removed_children(state, view, html_before) do
+  defp recursive_detect_added_or_removed_children(state, view, html_before, streams) do
     state.html
     |> DOM.inner_html!(view.id)
     |> DOM.find_live_views()
     |> Enum.reduce(state, fn {id, session, static}, acc ->
       case fetch_view_by_id(acc, id) do
         {:ok, view} ->
-          patch_view(acc, view, DOM.inner_html!(html_before, view.id))
+          patch_view(acc, view, DOM.inner_html!(html_before, view.id), streams)
 
         :error ->
           static = static || Map.get(state.root_view.child_statics, id)
@@ -747,7 +778,7 @@ defmodule Phoenix.LiveViewTest.ClientProxy do
           acc
           |> put_view(child_view, rendered)
           |> put_child(view, id, child_view.session_token)
-          |> recursive_detect_added_or_removed_children(child_view, acc.html)
+          |> recursive_detect_added_or_removed_children(child_view, acc.html, streams)
       end
     end)
   end
@@ -784,7 +815,7 @@ defmodule Phoenix.LiveViewTest.ClientProxy do
   end
 
   defp push_with_reply(state, from, view, event, payload) do
-    push_with_callback(state, view, event, payload, fn reply, state ->
+    push_with_callback(state, view, event, from, payload, fn reply, state ->
       {:noreply, render_reply(reply, from, state)}
     end)
   end
@@ -814,12 +845,12 @@ defmodule Phoenix.LiveViewTest.ClientProxy do
     end
   end
 
-  defp push_with_callback(state, view, event, payload, callback) do
+  defp push_with_callback(state, view, event, from, payload, callback) do
     ref = to_string(state.ref + 1)
 
     state
     |> push(view, event, payload)
-    |> put_reply(ref, view.pid, callback)
+    |> put_reply(ref, view.pid, from, callback)
   end
 
   defp build_child(%ClientProxy{ref: ref, proxy: proxy, endpoint: endpoint}, attrs) do
@@ -932,12 +963,14 @@ defmodule Phoenix.LiveViewTest.ClientProxy do
   end
 
   defp maybe_event(:click, {"a", _, _} = node, element) do
+    live_nav = DOM.attribute(node, "data-phx-link")
+
     cond do
-      event = DOM.attribute(node, "phx-click") ->
+      event = is_nil(live_nav) && DOM.attribute(node, "phx-click") ->
         {:ok, event}
 
       to = DOM.attribute(node, "href") ->
-        case DOM.attribute(node, "data-phx-link") do
+        case live_nav do
           "patch" ->
             {:patch, proxy_topic(element), to}
 
@@ -987,12 +1020,10 @@ defmodule Phoenix.LiveViewTest.ClientProxy do
       [] ->
         raise ArgumentError, "no push command found within JS commands: #{inspect(js)}"
 
-      [["push", %{"event" => event} = args]] ->
-        {event, args["value"] || %{}, args["target"]}
-
-      [_ | _] ->
-        raise ArgumentError,
-              "Phoenix.LiveViewTest currently only supports a single push within JS commands"
+      push_events ->
+        Enum.map(push_events, fn ["push", %{"event" => event} = args] ->
+          {event, args["value"] || %{}, args["target"]}
+        end)
     end
   end
 
@@ -1079,14 +1110,25 @@ defmodule Phoenix.LiveViewTest.ClientProxy do
     end
   end
 
+  # Selectedness algorithm as outlined in
+  # https://html.spec.whatwg.org/multipage/form-elements.html#the-select-element
   defp form_defaults({"select", _, _} = node, name, acc) do
     options = DOM.filter(node, &(DOM.tag(&1) == "option"))
 
+    multiple_display_size =
+      case valid_display_size(node) do
+        int when is_integer(int) and int > 1 -> true
+        _ -> false
+      end
+
     all_selected =
-      if DOM.attribute(node, "multiple") do
+      if DOM.attribute(node, "multiple") || multiple_display_size do
         Enum.filter(options, &DOM.attribute(&1, "selected"))
       else
-        List.wrap(Enum.find(options, &DOM.attribute(&1, "selected")) || List.first(options))
+        List.wrap(
+          Enum.find(Enum.reverse(options), &DOM.attribute(&1, "selected")) ||
+            Enum.find(options, &(!DOM.attribute(&1, "disabled")))
+        )
       end
 
     all_selected
@@ -1094,6 +1136,10 @@ defmodule Phoenix.LiveViewTest.ClientProxy do
     |> Enum.reduce(acc, fn selected, acc ->
       Plug.Conn.Query.decode_pair({name, DOM.attribute(selected, "value")}, acc)
     end)
+  end
+
+  defp form_defaults({"textarea", _, []}, name, acc) do
+    Plug.Conn.Query.decode_pair({name, ""}, acc)
   end
 
   defp form_defaults({"textarea", _, [value]}, name, acc) do
@@ -1117,6 +1163,15 @@ defmodule Phoenix.LiveViewTest.ClientProxy do
 
       true ->
         Plug.Conn.Query.decode_pair({name, value}, acc)
+    end
+  end
+
+  defp valid_display_size(node) do
+    with size when not is_nil(size) <- DOM.attribute(node, "size"),
+         {int, ""} when int > 0 <- Integer.parse(size) do
+      int
+    else
+      _ -> nil
     end
   end
 

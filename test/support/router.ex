@@ -41,7 +41,10 @@ defmodule Phoenix.LiveViewTest.Router do
     live "/components", WithComponentLive
     live "/multi-targets", WithMultipleTargets
     live "/assigns-not-in-socket", AssignsNotInSocketLive
+    live "/log-override", WithLogOverride
+    live "/log-disabled", WithLogDisabled
     live "/errors", ErrorsLive
+    live "/live-reload", ReloadLive
 
     # controller test
     get "/controller/:type", Controller, :incoming
@@ -64,7 +67,7 @@ defmodule Phoenix.LiveViewTest.Router do
     live "/router/foobarbaz/nosuffix", NoSuffix, :index, as: :custom_route
 
     # integration layout
-    live_session :styled_layout, root_layout: {Phoenix.LiveViewTest.LayoutView, "styled.html"} do
+    live_session :styled_layout, root_layout: {Phoenix.LiveViewTest.LayoutView, :styled} do
       live "/styled-elements", ElementsLive
     end
 
@@ -97,6 +100,8 @@ defmodule Phoenix.LiveViewTest.Router do
     live "/events", EventsLive
     live "/events-in-mount", EventsInMountLive
     live "/events-in-component", EventsInComponentLive
+    live "/events-multi-js", EventsMultiJSLive
+    live "/events-multi-js-in-component", EventsInComponentMultiJSLive
 
     # integration components
     live "/component_in_live", ComponentInLive.Root
@@ -114,6 +119,9 @@ defmodule Phoenix.LiveViewTest.Router do
     live "/lifecycle/handle-params-not-defined", HooksLive.HandleParamsNotDefined
     live "/lifecycle/handle-info-not-defined", HooksLive.HandleInfoNotDefined
 
+    # integration stream
+    live "/stream", StreamLive
+
     # integration connect
     live "/connect", ConnectLive
 
@@ -127,6 +135,7 @@ defmodule Phoenix.LiveViewTest.Router do
     live_session :test do
       live "/thermo-live-session", ThermostatLive
       live "/clock-live-session", ClockLive
+      live "/classlist", ClassListLive
     end
 
     live_session :admin, session: %{"admin" => true} do
@@ -161,6 +170,10 @@ defmodule Phoenix.LiveViewTest.Router do
         {Phoenix.LiveViewTest.OtherOnMount, :other}
       ] do
       live "/lifecycle/mount-mods-args", HooksLive.Noop
+    end
+
+    live_session :layout, layout: {Phoenix.LiveViewTest.LayoutView, :live_override} do
+      live "/dashboard-live-session-layout", LayoutLive
     end
   end
 

@@ -1,4 +1,4 @@
-# Security considerations of the LiveView model
+# Security considerations
 
 LiveView begins its life-cycle as a regular HTTP request. Then a stateful
 connection is established. Both the HTTP request and the stateful connection
@@ -37,8 +37,12 @@ sessions on the `mount` callback. Authorization rules generally happen on
 
 ## Mounting considerations
 
-If you perform user authentication and confirmation on every HTTP request
-via Plugs, such as this:
+The [`mount/3`](`c:Phoenix.LiveView.mount/3`) callback is invoked both on
+the initial HTTP mount and when LiveView is connected. Therefore, any
+authentication performed during mount will cover all scenarios.
+
+If you perform user authentication and confirmation exclusively on HTTP
+requests via Plugs, such as this:
 
     plug :ensure_user_authenticated
     plug :ensure_user_confirmed
@@ -64,12 +68,15 @@ which allows you to encapsulate this logic and execute it on every mount,
 as you would with plug:
 
     defmodule MyAppWeb.UserLiveAuth do
+      import Phoenix.Component
       import Phoenix.LiveView
+      alias MyAppWeb.Accounts # from `mix phx.gen.auth`
 
-      def on_mount(:default, _params, %{"user_id" => user_id} = _session, socket) do
-        socket = assign_new(socket, :current_user, fn ->
-          Accounts.get_user!(user_id)
-        end)
+      def on_mount(:default, _params, %{"user_token" => user_token} = _session, socket) do
+        socket =
+          assign_new(socket, :current_user, fn ->
+            Accounts.get_user_by_session_token(user_token)
+          end)
 
         if socket.assigns.current_user.confirmed_at do
           {:cont, socket}
@@ -79,8 +86,7 @@ as you would with plug:
       end
     end
 
-
-We use [`assign_new/3`](`Phoenix.LiveView.assign_new/3`). This is a
+We use [`assign_new/3`](`Phoenix.Component.assign_new/3`). This is a
 convenience to avoid fetching the `current_user` multiple times across
 LiveViews.
 
@@ -99,10 +105,10 @@ to run it on all LiveViews by default:
     def live_view do
       quote do
         use Phoenix.LiveView,
-          layout: {<%= web_namespace %>.LayoutView, "live.html"}
+          layout: {MyAppWeb.LayoutView, :live}
 
         on_mount MyAppWeb.UserLiveAuth
-        unquote(view_helpers())
+        unquote(html_helpers())
       end
     end
 

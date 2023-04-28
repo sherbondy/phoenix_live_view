@@ -58,6 +58,38 @@ let DOM = {
     return node.id && DOM.private(node, "destroyed") ? true : false
   },
 
+  wantsNewTab(e){
+    let wantsNewTab = e.ctrlKey || e.shiftKey || e.metaKey || (e.button && e.button === 1)
+    return wantsNewTab || e.target.getAttribute("target") === "_blank"
+  },
+
+  isUnloadableFormSubmit(e){
+    return !e.defaultPrevented && !this.wantsNewTab(e)
+  },
+
+  isNewPageHref(href, currentLocation){
+    if(href.startsWith("mailto:") || href.startsWith("tel:")){ return false }
+
+    let url
+    try {
+      url = new URL(href)
+    } catch(e) {
+      try {
+        url = new URL(href, currentLocation)
+      } catch(e) {
+        // bad URL, fallback to let browser try it as external
+        return true
+      }
+    }
+
+    if(url.host === currentLocation.host && url.protocol === currentLocation.protocol){
+      if(url.pathname === currentLocation.pathname && url.search === currentLocation.search){
+        return url.hash === "" && !url.href.endsWith("#")
+      }
+    }
+    return true
+  },
+
   markPhxChildDestroyed(el){
     if(this.isPhxChild(el)){ el.setAttribute(PHX_SESSION, "") }
     this.putPrivate(el, "destroyed", true)
@@ -85,15 +117,18 @@ let DOM = {
 
   findParentCIDs(node, cids){
     let initial = new Set(cids)
-    return cids.reduce((acc, cid) => {
-      let selector = `[${PHX_COMPONENT}="${cid}"] [${PHX_COMPONENT}]`
+    let parentCids =
+      cids.reduce((acc, cid) => {
+        let selector = `[${PHX_COMPONENT}="${cid}"] [${PHX_COMPONENT}]`
 
-      this.filterWithinSameLiveView(this.all(node, selector), node)
-        .map(el => parseInt(el.getAttribute(PHX_COMPONENT)))
-        .forEach(childCID => acc.delete(childCID))
+        this.filterWithinSameLiveView(this.all(node, selector), node)
+          .map(el => parseInt(el.getAttribute(PHX_COMPONENT)))
+          .forEach(childCID => acc.delete(childCID))
 
-      return acc
-    }, initial)
+        return acc
+      }, initial)
+
+    return parentCids.size === 0 ? new Set(cids) : parentCids
   },
 
   filterWithinSameLiveView(nodes, parent){
@@ -137,11 +172,15 @@ let DOM = {
 
   putTitle(str){
     let titleEl = document.querySelector("title")
-    let {prefix, suffix} = titleEl.dataset
-    document.title = `${prefix || ""}${str}${suffix || ""}`
+    if(titleEl){
+      let {prefix, suffix} = titleEl.dataset
+      document.title = `${prefix || ""}${str}${suffix || ""}`
+    } else {
+      document.title = str
+    }
   },
 
-  debounce(el, event, phxDebounce, defaultDebounce, phxThrottle, defaultThrottle, callback){
+  debounce(el, event, phxDebounce, defaultDebounce, phxThrottle, defaultThrottle, asyncFilter, callback){
     let debounce = el.getAttribute(phxDebounce)
     let throttle = el.getAttribute(phxThrottle)
     if(debounce === ""){ debounce = defaultDebounce }
@@ -174,12 +213,15 @@ let DOM = {
           } else {
             callback()
             this.putPrivate(el, THROTTLED, true)
-            setTimeout(() => this.triggerCycle(el, DEBOUNCE_TRIGGER), timeout)
+            setTimeout(() => {
+              if(asyncFilter()){ this.triggerCycle(el, DEBOUNCE_TRIGGER) }
+            }, timeout)
           }
         } else {
-          setTimeout(() => this.triggerCycle(el, DEBOUNCE_TRIGGER, currentCycle), timeout)
+          setTimeout(() => {
+            if(asyncFilter()){ this.triggerCycle(el, DEBOUNCE_TRIGGER, currentCycle) }
+          }, timeout)
         }
-
 
         let form = el.form
         if(form && this.once(form, "bind-debounce")){
@@ -219,15 +261,27 @@ let DOM = {
     return currentCycle
   },
 
-  discardError(container, el, phxFeedbackFor){
-    let field = el.getAttribute && el.getAttribute(phxFeedbackFor)
-    // TODO: Remove id lookup after we update Phoenix to use input_name instead of input_id
-    let input = field && container.querySelector(`[id="${field}"], [name="${field}"]`)
-    if(!input){ return }
-
-    if(!(this.private(input, PHX_HAS_FOCUSED) || this.private(input.form, PHX_HAS_SUBMITTED))){
-      el.classList.add(PHX_NO_FEEDBACK_CLASS)
+  maybeHideFeedback(container, input, phxFeedbackFor){
+    if(!(this.private(input, PHX_HAS_FOCUSED) || this.private(input, PHX_HAS_SUBMITTED))){
+      let feedbacks = [input.name]
+      if(input.name.endsWith("[]")){ feedbacks.push(input.name.slice(0, -2)) }
+      let selector = feedbacks.map(f => `[${phxFeedbackFor}="${f}"]`).join(", ")
+      DOM.all(container, selector, el => el.classList.add(PHX_NO_FEEDBACK_CLASS))
     }
+  },
+
+  resetForm(form, phxFeedbackFor){
+    Array.from(form.elements).forEach(input => {
+      let query = `[${phxFeedbackFor}="${input.id}"],
+                   [${phxFeedbackFor}="${input.name}"],
+                   [${phxFeedbackFor}="${input.name.replace(/\[\]$/, "")}"]`
+
+      this.deletePrivate(input, PHX_HAS_FOCUSED)
+      this.deletePrivate(input, PHX_HAS_SUBMITTED)
+      this.all(document, query, feedbackEl => {
+        feedbackEl.classList.add(PHX_NO_FEEDBACK_CLASS)
+      })
+    })
   },
 
   showError(inputEl, phxFeedbackFor){

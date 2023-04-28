@@ -160,6 +160,20 @@ defmodule Phoenix.LiveView.EngineTest do
       assert changed(template, %{foo: 123}, %{foo: true}) == ["123"]
     end
 
+    test "does not render dynamic if it is unchanged via assigns dot" do
+      template = "<%= assigns.foo %>"
+      assert changed(template, %{foo: 123}, nil) == ["123"]
+      assert changed(template, %{foo: 123}, %{}) == [nil]
+      assert changed(template, %{foo: 123}, %{foo: true}) == ["123"]
+    end
+
+    test "does not render dynamic if it is unchanged via assigns access" do
+      template = "<%= assigns[:foo] %>"
+      assert changed(template, %{foo: 123}, nil) == ["123"]
+      assert changed(template, %{foo: 123}, %{}) == [nil]
+      assert changed(template, %{foo: 123}, %{foo: true}) == ["123"]
+    end
+
     test "renders dynamic if any of the assigns change" do
       template = "<%= @foo + @bar %>"
       assert changed(template, %{foo: 123, bar: 456}, nil) == ["579"]
@@ -247,6 +261,21 @@ defmodule Phoenix.LiveView.EngineTest do
       assert changed(template, new_augmented, old) == [nil]
       assert changed(template, new_changed_foo, old) == ["777"]
       assert changed(template, new_changed_bar, old) == ["777"]
+    end
+
+    test "renders dynamic with access tracking for forms" do
+      form1 = Phoenix.Component.to_form(%{"foo" => "bar"})
+      form2 = Phoenix.Component.to_form(%{"foo" => "bar", "baz" => "bat"})
+      form3 = Phoenix.Component.to_form(%{"foo" => "baz"})
+
+      template = "<%= Map.fetch!(@form[:foo], :value) %>"
+      assert changed(template, %{form: form1}, nil) == ["bar"]
+
+      template = "<%= Map.fetch!(@form[:foo], :value) %>"
+      assert changed(template, %{form: form1}, %{}) == [nil]
+      assert changed(template, %{form: form1}, %{form: form1}) == [nil]
+      assert changed(template, %{form: form2}, %{form: form1}) == [nil]
+      assert changed(template, %{form: form3}, %{form: form1}) == ["baz"]
     end
 
     test "renders dynamic with access tracking inside comprehension" do
@@ -428,7 +457,7 @@ defmodule Phoenix.LiveView.EngineTest do
                [""]
     end
 
-    test "converts if-do with var into rendered" do
+    test "converts if-do with var assignments into rendered" do
       template = "<%= if var = @foo do %>one<%= var %>two<% end %>"
 
       assert [%Rendered{dynamic: ["true"], static: ["one", "two"]}] =
@@ -436,6 +465,19 @@ defmodule Phoenix.LiveView.EngineTest do
 
       assert changed(template, %{foo: true}, %{}) == [nil]
       assert changed(template, %{foo: false}, %{foo: true}) == [""]
+    end
+
+    test "converts if-do with external var assignments into rendered but tainted" do
+      template = "<%= var = @foo %><%= if var do %>one<%= var %>two<% end %>"
+
+      assert ["true", %Rendered{dynamic: ["true"], static: ["one", "two"]}] =
+               changed(template, %{foo: true}, nil)
+
+      assert ["true", %Rendered{dynamic: ["true"], static: ["one", "two"]}] =
+               changed(template, %{foo: true}, %{})
+
+      assert ["false", ""] =
+               changed(template, %{foo: false}, %{foo: true})
     end
 
     test "converts if-do-else into rendered with dynamic condition" do
@@ -501,7 +543,7 @@ defmodule Phoenix.LiveView.EngineTest do
              ] = changed(template, %{foo: 123}, %{foo: true})
     end
 
-    test "converts if-do if-do with var into rendered" do
+    test "converts if-do if-do with var assignment into rendered" do
       template = "<%= if var = @foo do %>one<%= if var do %>uno<%= var %>dos<% end %>two<% end %>"
 
       assert [

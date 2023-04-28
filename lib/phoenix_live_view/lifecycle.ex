@@ -10,10 +10,11 @@ defmodule Phoenix.LiveView.Lifecycle do
           handle_event: [hook],
           handle_info: [hook],
           handle_params: [hook],
+          after_render: [hook],
           mount: [hook]
         }
 
-  defstruct handle_event: [], handle_info: [], handle_params: [], mount: []
+  defstruct handle_event: [], handle_info: [], handle_params: [], mount: [], after_render: []
 
   @doc """
   Returns a map of infos about the lifecycle stage for the given `view`.
@@ -40,8 +41,8 @@ defmodule Phoenix.LiveView.Lifecycle do
   end
 
   def attach_hook(%Socket{} = socket, id, stage, fun)
-      when stage in [:handle_event, :handle_info, :handle_params] do
-    lifecycle = lifecycle(socket)
+      when stage in [:handle_event, :handle_info, :handle_params, :after_render] do
+    lifecycle = lifecycle(socket, stage)
     hook = hook!(id, stage, fun)
     existing = Enum.find(Map.fetch!(lifecycle, stage), &(&1.id == id))
 
@@ -67,7 +68,7 @@ defmodule Phoenix.LiveView.Lifecycle do
   end
 
   def detach_hook(%Socket{} = socket, id, stage)
-      when stage in [:handle_event, :handle_info, :handle_params] do
+      when stage in [:handle_event, :handle_info, :handle_params, :after_render] do
     update_lifecycle(socket, stage, fn hooks ->
       for hook <- hooks, hook.id != id, do: hook
     end)
@@ -83,8 +84,8 @@ defmodule Phoenix.LiveView.Lifecycle do
     """
   end
 
-  defp lifecycle(socket) do
-    if Utils.cid(socket) do
+  defp lifecycle(socket, stage) do
+    if Utils.cid(socket) && stage not in [:after_render] do
       raise ArgumentError, "lifecycle hooks are not supported on stateful components."
     end
 
@@ -92,7 +93,7 @@ defmodule Phoenix.LiveView.Lifecycle do
   end
 
   defp update_lifecycle(socket, stage, fun) do
-    lifecycle = lifecycle(socket)
+    lifecycle = lifecycle(socket, stage)
     new_lifecycle = Map.update!(lifecycle, stage, fun)
     put_lifecycle(socket, new_lifecycle)
   end
@@ -160,10 +161,21 @@ defmodule Phoenix.LiveView.Lifecycle do
 
   @doc false
   def handle_event(event, val, %Socket{private: %{@lifecycle => lifecycle}} = socket) do
-    reduce_socket(lifecycle.handle_event, socket, fn hook, acc ->
+    reduce_handle_event(lifecycle.handle_event, socket, fn hook, acc ->
       hook.function.(event, val, acc)
     end)
   end
+
+  defp reduce_handle_event([hook | hooks], acc, function) do
+    case function.(hook, acc) do
+      {:cont, %Socket{} = socket} -> reduce_handle_event(hooks, socket, function)
+      {:halt, %Socket{} = socket} -> {:halt, socket}
+      {:halt, reply, %Socket{} = socket} -> {:halt, reply, socket}
+      other -> bad_lifecycle_response!(other, hook)
+    end
+  end
+
+  defp reduce_handle_event([], acc, _function), do: {:cont, acc}
 
   @doc false
   def handle_params(params, uri, %Socket{private: %{@lifecycle => lifecycle}} = socket) do
@@ -177,6 +189,23 @@ defmodule Phoenix.LiveView.Lifecycle do
     reduce_socket(lifecycle.handle_info, socket, fn hook, acc ->
       hook.function.(msg, acc)
     end)
+  end
+
+  @doc false
+  def after_render(%Socket{private: %{@lifecycle => lifecycle}} = socket) do
+    {:cont, new_socket} =
+      reduce_socket(lifecycle.after_render, socket, fn hook, acc ->
+        case hook.function.(acc) do
+          %Socket{} = new_socket ->
+            {:cont, new_socket}
+
+          other ->
+            raise ArgumentError,
+                  "expected after_render hook to return a socket, got: #{inspect(other)}"
+        end
+      end)
+
+    new_socket
   end
 
   defp reduce_socket([hook | hooks], acc, function) do
@@ -195,10 +224,24 @@ defmodule Phoenix.LiveView.Lifecycle do
 
     Expected one of:
 
-        {:cont, %Socket{}}
-        {:halt, %Socket{}}
+        #{expected_return(hook)}
 
     Got: #{inspect(result)}
+    """
+  end
+
+  defp expected_return(%{stage: :handle_event}) do
+    """
+    {:cont, %Socket{}}
+    {:halt, %Socket{}}
+    {:halt, map, %Socket{}}
+    """
+  end
+
+  defp expected_return(_) do
+    """
+    {:cont, %Socket{}}
+    {:halt, %Socket{}}
     """
   end
 

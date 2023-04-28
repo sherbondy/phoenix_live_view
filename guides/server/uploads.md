@@ -4,7 +4,7 @@ LiveView supports interactive file uploads with progress for
 both direct to server uploads as well as direct-to-cloud
 [external uploads](uploads-external.html) on the client.
 
-### Built-in Features
+## Built-in Features
 
   * Accept specification - Define accepted file types, max
     number of entries, max file size, etc. When the client
@@ -17,7 +17,7 @@ both direct to server uploads as well as direct-to-cloud
     respond to progress, errors, cancellation, etc.
 
   * Drag and drop - Use the `phx-drop-target` attribute to
-    enable. See `Phoenix.LiveView.Helpers.live_file_input/2`.
+    enable. See `Phoenix.Component.live_file_input/1`.
 
 ## Allow uploads
 
@@ -40,21 +40,21 @@ template.
 
 ## Render reactive elements
 
-Use the `Phoenix.LiveView.Helpers.live_file_input/2` file
-input generator to render a file input for the upload:
+Use the `Phoenix.Component.live_file_input/1` component
+to render a file input for the upload:
 
 ```heex
-<%# lib/my_app_web/live/upload_live.html.heex %>
+<%!-- lib/my_app_web/live/upload_live.html.heex --%>
 
 <form id="upload-form" phx-submit="save" phx-change="validate">
-  <%= live_file_input @uploads.avatar %>
+  <.live_file_input upload={@uploads.avatar} />
   <button type="submit">Upload</button>
 </form>
 ```
 
 > **Important:** You must bind `phx-submit` and `phx-change` on the form.
 
-Note that while [`live_file_input/2`]
+Note that while [`live_file_input/1`]
 allows you to set additional attributes on the file input,
 many attributes such as `id`, `accept`, and `multiple` will
 be set automatically based on the [`allow_upload/3`] spec.
@@ -74,28 +74,27 @@ info, errors, etc.
 Let's look at an annotated example:
 
 ```heex
-<%# lib/my_app_web/live/upload_live.html.heex %>
+<%!-- lib/my_app_web/live/upload_live.html.heex --%>
 
-<%# use phx-drop-target with the upload ref to enable file drag and drop %>
+<%!-- use phx-drop-target with the upload ref to enable file drag and drop --%>
 <section phx-drop-target={@uploads.avatar.ref}>
 
-<%# render each avatar entry %>
+<%!-- render each avatar entry --%>
 <%= for entry <- @uploads.avatar.entries do %>
   <article class="upload-entry">
 
     <figure>
-      <%# Phoenix.LiveView.Helpers.live_img_preview/2 renders a client-side preview %>
-      <%= live_img_preview entry %>
+      <.live_img_preview entry={entry} />
       <figcaption><%= entry.client_name %></figcaption>
     </figure>
 
-    <%# entry.progress will update automatically for in-flight entries %>
+    <%!-- entry.progress will update automatically for in-flight entries --%>
     <progress value={entry.progress} max="100"> <%= entry.progress %>% </progress>
 
-    <%# a regular click event whose handler will invoke Phoenix.LiveView.cancel_upload/3 %>
-    <button phx-click="cancel-upload" phx-value-ref={entry.ref} aria-label="cancel">&times;</button>
+    <%!-- a regular click event whose handler will invoke Phoenix.LiveView.cancel_upload/3 --%>
+    <button type="button" phx-click="cancel-upload" phx-value-ref={entry.ref} aria-label="cancel">&times;</button>
 
-    <%# Phoenix.LiveView.Helpers.upload_errors/2 returns a list of error atoms %>
+    <%!-- Phoenix.Component.upload_errors/2 returns a list of error atoms --%>
     <%= for err <- upload_errors(@uploads.avatar, entry) do %>
       <p class="alert alert-danger"><%= error_to_string(err) %></p>
     <% end %>
@@ -103,7 +102,7 @@ Let's look at an annotated example:
   </article>
 <% end %>
 
-<%# Phoenix.LiveView.Helpers.upload_errors/1 returns a list of error atoms %>
+<%!-- Phoenix.Component.upload_errors/1 returns a list of error atoms --%>
 <%= for err <- upload_errors(@uploads.avatar) do %>
   <p class="alert alert-danger"><%= error_to_string(err) %></p>
 <% end %>
@@ -137,7 +136,7 @@ end
 
 Entries for files that do not match the [`allow_upload/3`]
 spec will contain errors. Use
-`Phoenix.LiveView.Helpers.upload_errors/2` and your own
+`Phoenix.Component.upload_errors/2` and your own
 helper function to render a friendly error message:
 
 ```elixir
@@ -146,7 +145,7 @@ def error_to_string(:not_accepted), do: "You have selected an unacceptable file 
 ```
 
 For error messages that affect all entries, use
-`Phoenix.LiveView.Helpers.upload_errors/1`, and your own
+`Phoenix.Component.upload_errors/1`, and your own
 helper function to render a friendly error message:
 
 ```elixir
@@ -168,7 +167,7 @@ end
 
 ## Consume uploaded entries
 
-When the end-user submits a form containing a [`live_file_input/2`],
+When the end-user submits a form containing a [`live_file_input/1`],
 the JavaScript client first uploads the file(s) before
 invoking the callback for the form's `phx-submit` event.
 
@@ -183,9 +182,10 @@ def handle_event("save", _params, socket) do
   uploaded_files =
     consume_uploaded_entries(socket, :avatar, fn %{path: path}, _entry ->
       dest = Path.join([:code.priv_dir(:my_app), "static", "uploads", Path.basename(path)])
-      # The `static/uploads` directory must exist for `File.cp!/2` to work.
+      # The `static/uploads` directory must exist for `File.cp!/2`
+      # and MyAppWeb.static_paths/0 should contain uploads to work,.
       File.cp!(path, dest)
-      {:ok, Routes.static_path(socket, "/uploads/#{Path.basename(dest)}")}
+      {:ok, ~p"/uploads/#{Path.basename(dest)}"}
     end)
 
   {:noreply, update(socket, :uploaded_files, &(&1 ++ uploaded_files))}
@@ -232,7 +232,7 @@ defmodule MyAppWeb.UploadLive do
       consume_uploaded_entries(socket, :avatar, fn %{path: path}, _entry ->
         dest = Path.join([:code.priv_dir(:my_app), "static", "uploads", Path.basename(path)])
         File.cp!(path, dest)
-        {:ok, Routes.static_path(socket, "/uploads/#{Path.basename(dest)}")}
+        {:ok, ~p"/uploads/#{Path.basename(dest)}"}
       end)
 
     {:noreply, update(socket, :uploaded_files, &(&1 ++ uploaded_files))}
@@ -245,4 +245,4 @@ end
 ```
 
 [`allow_upload/3`]: `Phoenix.LiveView.allow_upload/3`
-[`live_file_input/2`]: `Phoenix.LiveView.Helpers.live_file_input/2`
+[`live_file_input/1`]: `Phoenix.Component.live_file_input/1`

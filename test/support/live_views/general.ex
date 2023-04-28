@@ -3,6 +3,11 @@ alias Phoenix.LiveViewTest.{ClockLive, ClockControlsLive}
 defmodule Phoenix.LiveViewTest.ThermostatLive do
   use Phoenix.LiveView, container: {:article, class: "thermo"}, namespace: Phoenix.LiveViewTest
 
+  defmodule Error do
+    defexception [:plug_status]
+    def message(%{plug_status: status}), do: "error #{status}"
+  end
+
   def render(assigns) do
     ~H"""
     Redirect: <%= @redirect %>
@@ -16,6 +21,22 @@ defmodule Phoenix.LiveViewTest.ThermostatLive do
       <% end %>
     <% end %>
     """
+  end
+
+  def mount(%{"raise_connected" => status}, session, socket) do
+    if connected?(socket) do
+      raise Error, plug_status: String.to_integer(status)
+    else
+      mount(%{}, session, socket)
+    end
+  end
+
+  def mount(%{"raise_disconnected" => status}, session, socket) do
+    if connected?(socket) do
+      mount(%{}, session, socket)
+    else
+      raise Error, plug_status: String.to_integer(status)
+    end
   end
 
   def mount(_params, session, socket) do
@@ -269,7 +290,7 @@ defmodule Phoenix.LiveViewTest.RedirLive do
     end
   end
 
-  defp do_redirect(socket, "push_redirect", opts), do: push_redirect(socket, opts)
+  defp do_redirect(socket, "push_navigate", opts), do: push_navigate(socket, opts)
   defp do_redirect(socket, "redirect", opts), do: redirect(socket, opts)
   defp do_redirect(socket, "external", to: url), do: redirect(socket, external: url)
   defp do_redirect(socket, "push_patch", opts), do: push_patch(socket, opts)
@@ -308,4 +329,10 @@ defmodule Phoenix.LiveViewTest.ErrorsLive do
   def handle_params(_params, _session, socket), do: {:noreply, socket}
 
   def handle_event("crash", _params, _socket), do: raise("boom handle_event")
+end
+
+defmodule Phoenix.LiveViewTest.ClassListLive do
+  use Phoenix.LiveView, container: {:span, class: ~w(foo bar)}
+
+  def render(assigns), do: ~H|Some content|
 end

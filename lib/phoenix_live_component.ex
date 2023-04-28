@@ -1,10 +1,10 @@
 defmodule Phoenix.LiveComponent do
-  @moduledoc """
+  @moduledoc ~S'''
   LiveComponents are a mechanism to compartmentalize state, markup, and
   events in LiveView.
 
   LiveComponents are defined by using `Phoenix.LiveComponent` and are used
-  by calling `Phoenix.LiveView.Helpers.live_component/1` in a parent LiveView.
+  by calling `Phoenix.Component.live_component/1` in a parent LiveView.
   They run inside the LiveView process but have their own state and
   life-cycle. For this reason, they are also often called "stateful components".
   This is a contrast to `Phoenix.Component`, also known as "function components",
@@ -18,9 +18,9 @@ defmodule Phoenix.LiveComponent do
         use Phoenix.LiveComponent
 
         def render(assigns) do
-          ~H"\""
+          ~H"""
           <div class="hero"><%= @content %></div>
-          "\""
+          """
         end
       end
 
@@ -35,17 +35,23 @@ defmodule Phoenix.LiveComponent do
 
   ## Life-cycle
 
+  ### Mount and update
+
   Stateful components are identified by the component module and their ID.
   Therefore, two stateful components with the same module and ID are treated
   as the same component. We often tie the component ID to some application based ID:
 
       <.live_component module={UserComponent} id={@user.id} user={@user} />
 
-  When [`live_component/1`](`Phoenix.LiveView.Helpers.live_component/1`) is called,
+  When [`live_component/1`](`Phoenix.Component.live_component/1`) is called,
   `c:mount/1` is called once, when the component is first added to the page. `c:mount/1`
   receives the `socket` as argument. Then `c:update/2` is invoked with all of the
-  assigns given to [`live_component/1`](`Phoenix.LiveView.Helpers.live_component/1`).
+  assigns given to [`live_component/1`](`Phoenix.Component.live_component/1`).
   If `c:update/2` is not defined all assigns are simply merged into the socket.
+  The assigns received as the first argument of the [`update/2`](`c:Phoenix.LiveComponent.update/2`)
+  callback will only include the _new_ assigns passed from this function.
+  Pre-existing assigns may be found in `socket.assigns`.
+
   After the component is updated, `c:render/1` is called with all assigns.
   On first render, we get:
 
@@ -62,15 +68,15 @@ defmodule Phoenix.LiveComponent do
         use Phoenix.LiveComponent
 
         def render(assigns) do
-          ~H"\""
+          ~H"""
           <div id={"user-\#{@id}"} class="user">
             <%= @user.name %>
           </div>
-          "\""
+          """
         end
       end
 
-  ## Targeting Component Events
+  ### Events
 
   Stateful components can also implement the `c:handle_event/3` callback
   that works exactly the same as in LiveView. For a client event to
@@ -108,15 +114,15 @@ defmodule Phoenix.LiveComponent do
         Dismiss
       </a>
 
-  ## Preloading and update
+  ### Preloading and update
 
   Stateful components also support an optional `c:preload/1` callback.
   The `c:preload/1` callback is useful when multiple components of the
   same type are rendered on the page and you want to preload or augment
   their data in batches.
 
-  For each rendering, the optional `c:preload/1` and `c:update/2` callbacks
-  are called before `c:render/1`.
+  Once a LiveView renders a LiveComponent, the optional `c:preload/1` and
+  `c:update/2` callbacks are called before `c:render/1`.
 
   So on first render, the following callbacks will be invoked:
 
@@ -167,6 +173,47 @@ defmodule Phoenix.LiveComponent do
   Finally, note that `c:preload/1` must return an updated `list_of_assigns`,
   keeping the assigns in the same order as they were given.
 
+  ### Summary
+
+  All of the life-cycle events are summarized in the diagram below.
+  The bubble events in white are triggers that invoke the component.
+  In blue you have component callbacks, where the underlined names
+  represent required callbacks:
+
+  ```mermaid
+  flowchart LR
+    *((start)):::event-.->P
+    WE([wait for<br>parent changes]):::event-.->P
+    W([wait for<br>events]):::event-.->H
+
+    subgraph j__transparent[" "]
+
+      subgraph i[" "]
+        direction TB
+        P(preload/1):::callback-->M(mount/1)
+        M(mount/1<br><em>only once</em>):::callback-->U
+      end
+
+      U(update/2):::callback-->A
+
+      subgraph j[" "]
+        direction TB
+        A --> |yes| R
+        H(handle_event/3):::callback-->A{any<br>changes?}:::diamond
+      end
+
+      A --> |no| W
+
+    end
+
+    R(render/1):::callback_req-->W
+
+    classDef event fill:#fff,color:#000,stroke:#000
+    classDef diamond fill:#FFC28C,color:#000,stroke:#000
+    classDef callback fill:#B7ADFF,color:#000,stroke-width:0
+    classDef callback_req fill:#B7ADFF,color:#000,stroke-width:0,text-decoration:underline
+  ```
+
   ## Slots
 
   LiveComponent can also receive slots, in the same way as a `Phoenix.Component`:
@@ -178,14 +225,13 @@ defmodule Phoenix.LiveComponent do
   If the LiveComponent defines an `c:update/2`, be sure that the socket it returns
   includes the `:inner_block` assign it received.
 
-  See the docs for `Phoenix.Component` for more information.
+  See [the docs](Phoenix.Component.html#module-slots.md) for `Phoenix.Component` for more information.
 
   ## Live patches and live redirects
 
-  A template rendered inside a component can use `Phoenix.LiveView.Helpers.live_patch/2`
-  and `Phoenix.LiveView.Helpers.live_redirect/2` calls. The
-  [`live_patch/2`](`Phoenix.LiveView.Helpers.live_patch/2`) is always handled
-  by the parent`LiveView`, as components do not provide `handle_params`.
+  A template rendered inside a component can use `<.link patch={...}>` and
+  `<.link navigate={...}>`. Patches are always handled by the parent `LiveView`,
+  as components do not provide `handle_params`.
 
   ## Managing state
 
@@ -206,12 +252,12 @@ defmodule Phoenix.LiveComponent do
         use Phoenix.LiveComponent
 
         def render(assigns) do
-          ~H"\""
+          ~H"""
           <form phx-submit="..." phx-target={@myself}>
             <input name="title"><%= @card.title %></input>
             ...
           </form>
-          "\""
+          """
         end
 
         ...
@@ -224,7 +270,7 @@ defmodule Phoenix.LiveComponent do
 
   If the board LiveView is the source of truth, it will be responsible
   for fetching all of the cards in a board. Then it will call
-  [`live_component/1`](`Phoenix.LiveView.Helpers.live_component/1`)
+  [`live_component/1`](`Phoenix.Component.live_component/1`)
   for each card, passing the card struct as argument to `CardComponent`:
 
       <%= for card <- @cards do %>
@@ -358,11 +404,11 @@ defmodule Phoenix.LiveComponent do
         use Phoenix.LiveComponent
 
         def render(assigns) do
-          ~H"\""
+          ~H"""
           <button class="css-framework-class" phx-click="click">
             <%= @text %>
           </button>
-          "\""
+          """
         end
 
         def handle_event("click", _, socket) do
@@ -374,11 +420,11 @@ defmodule Phoenix.LiveComponent do
   Instead, it is much simpler to create a function component:
 
       def my_button(%{text: _, click: _} = assigns) do
-        ~H"\""
+        ~H"""
         <button class="css-framework-class" phx-click={@click}>
           <%= @text %>
         </button>
-        "\""
+        """
       end
 
   If you keep components mostly as an application concern with
@@ -412,7 +458,7 @@ defmodule Phoenix.LiveComponent do
   `<svg>` tags to be nested, you can wrap the component content into an
   `<svg>` tag. This will ensure that it is correctly interpreted by the
   browser.
-  """
+  '''
 
   defmodule CID do
     @moduledoc """
@@ -435,16 +481,27 @@ defmodule Phoenix.LiveComponent do
 
   alias Phoenix.LiveView.Socket
 
-  defmacro __using__(_) do
-    quote do
-      @behaviour Phoenix.LiveComponent
-      use Phoenix.Component
+  @doc """
+  Uses LiveComponent in the current module.
 
-      require Phoenix.LiveView.Renderer
+      use Phoenix.LiveComponent
+
+  ## Options
+
+    * `:global_prefixes` - the global prefixes to use for components. See
+      `Global Attributes` in `Phoenix.Component` for more information.
+  """
+  defmacro __using__(opts \\ []) do
+    quote do
+      import Phoenix.LiveView
+      @behaviour Phoenix.LiveComponent
       @before_compile Phoenix.LiveView.Renderer
 
+      # Phoenix.Component must come last so its @before_compile runs last
+      use Phoenix.Component, Keyword.take(unquote(opts), [:global_prefixes])
+
       @doc false
-      def __live__, do: %{kind: :component, module: __MODULE__}
+      def __live__, do: %{kind: :component, module: __MODULE__, layout: false}
     end
   end
 

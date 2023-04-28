@@ -1,62 +1,53 @@
 # Phoenix LiveView
 
-[![Actions Status](https://github.com/phoenixframework/phoenix_live_view/workflows/CI/badge.svg)](https://github.com/phoenixframework/phoenix_live_view/actions?query=workflow%3ACI)
+[![Actions Status](https://github.com/phoenixframework/phoenix_live_view/workflows/CI/badge.svg)](https://github.com/phoenixframework/phoenix_live_view/actions?query=workflow%3ACI) [![Hex.pm](https://img.shields.io/hexpm/v/phoenix_live_view.svg)](https://hex.pm/packages/phoenix_live_view) [![Documentation](https://img.shields.io/badge/documentation-gray)](https://hexdocs.pm/phoenix_live_view)
 
 Phoenix LiveView enables rich, real-time user experiences
 with server-rendered HTML.
 
 Visit the [https://livebeats.fly.dev](https://livebeats.fly.dev/) demo to see the kinds of applications
-you can build, or see a sneak peak below:
+you can build, or see a sneak peek below:
 
 https://user-images.githubusercontent.com/576796/162234098-31b580fe-e424-47e6-b01d-cd2cfcf823a9.mp4
 
+<br />
+
 After you [install Elixir](https://elixir-lang.org/install.html)
-in your machine, you can create your first LiveView app in two
+on your machine, you can create your first LiveView app in two
 steps:
 
     $ mix archive.install hex phx_new
-    $ mix phx.new demo --live
+    $ mix phx.new demo
 
-## Features
+## Feature highlights
 
-  * Use a declarative model to render HTML on the server
-    over WebSockets with optional LongPolling fallback
+  * **Declarative rendering:** Render HTML on the server over WebSockets with a declarative model, including an optional LongPolling fallback.
 
-  * A rich templating language, called HEEx, with support
-    for function components, slots, HTML validation, and more
+  * **Rich templating language:** Enjoy HEEx: a templating language that supports function components, slots, HTML validation, verified routes, and more.
 
-  * Smart change tracking - after connected, LiveView sends
-    only what changed to the client, skipping the template
-    markup and reducing the payload. This makes LiveView
-    payloads much smaller than server-rendered HTML and on
-    par with fine-tuned SPA applications
+  * **Small payloads:** LiveView is smart enough to track changes so it only sends what the client needs, making LiveView payloads much smaller than server-rendered HTML.
 
-  * Live form validation with file upload support
+  * **Live form validation:** LiveView supports real-time form validation out of the box. Create rich user interfaces with features like uploads, nested inputs, and [specialized recovery](https://hexdocs.pm/phoenix_live_view/form-bindings.html#recovery-following-crashes-or-disconnects).
+  
+  * **File uploads:** Real-time file uploads with progress indicators and image previews. Process your uploads on the fly or submit them to your desired cloud service.
 
-  * A rich integration API with the client with `phx-click`,
-    `phx-focus`, `phx-blur`, `phx-submit`, etc. `phx-hook` is
-    included for the cases where you have to write JavaScript
+  * **Rich integration API:** Use the rich integration API to interact with the client, with `phx-click`, `phx-focus`, `phx-blur`, `phx-submit`, and `phx-hook` included for cases where you have to write JavaScript.
 
-  * Perform optimistic updates and transitions via JavaScript
-    commands (`Phoenix.LiveView.JS`)
+  * **Optimistic updates and transitions:** Perform optimistic updates and transitions with JavaScript commands via `Phoenix.LiveView.JS`.
 
-  * Code reuse via stateful components, which break templates,
-    state, and event handling into reusable bits, which is essential
-    in large applications
+  * **Loose coupling:** Reuse more code via stateful components with loosely-coupled templates, state, and event handling — a must for enterprise application development.
 
-  * Live navigation to enrich links and redirects to only load the
-    minimum amount of content as users navigate between pages
+  * **Live navigation:** Enriched links and redirects are just more ways LiveView keeps your app light and performant. Clients load the minimum amount of content needed as users navigate around your app without any compromise in user experience.
 
-  * A latency simulator so you can emulate how slow clients will
-    interact with your application
+  * **Latency simulator:** Emulate how slow clients will interact with your application with the latency simulator.
 
-  * Testing tools that allow you to write a confident test suite
-    without the complexity of running a whole browser alongside
-    your tests
+  * **Robust test suite:** Write tests with confidence alongside Phoenix LiveView built-in testing tools. No more running a whole browser alongside your tests.
 
 ## Official announcements
 
 News from the Phoenix team on LiveView:
+
+  * [LiveBeats: Building a Social Music App With Phoenix LiveView](https://fly.io/blog/livebeats/)
 
   * [Build a real-time Twitter clone with LiveView](https://www.phoenixframework.org/blog/build-a-real-time-twitter-clone-in-15-minutes-with-live-view-and-phoenix-1-5)
 
@@ -76,7 +67,7 @@ given in the markdown file [here](guides/introduction/installation.md).
 
 ## What makes LiveView unique?
 
-LiveView is server centric. You no longer have to worry about managing
+LiveView is server-centric. You no longer have to worry about managing
 both client and server to keep things in sync. LiveView automatically
 updates the client as changes happen on the server.
 
@@ -91,7 +82,7 @@ stateless requests that have to authenticate, decode, load, and encode
 data on every request.
 
 When LiveView was first announced, many developers from different
-backgrounds got inspired about the potential unlocked by LiveView to
+backgrounds got inspired by the potential unlocked by LiveView to
 build rich, real-time user experiences. We believe LiveView is built
 on top of a solid foundation that makes LiveView hard to replicate
 anywhere else:
@@ -109,9 +100,9 @@ anywhere else:
   * LiveView applications are *distributed and real-time*. A LiveView
     app can push events to users as those events happen anywhere in
     the system. Do you want to notify a user that their best friend
-    just connected? This is easily done without a single-line of
+    just connected? This is easily done without a single line of
     custom JavaScript and with no extra external dependencies
-    (no extra databases, no extra message queues, etc).
+    (no extra databases, no extra message queues, etc.).
 
   * LiveView performs change tracking: whenever you change a value on
     the server, LiveView will send to the client only the values that
@@ -129,6 +120,8 @@ $ npm install --save --prefix assets mdn-polyfills url-search-params-polyfill fo
 ```
 
 Note: The `shim-keyboard-event-key` polyfill is also required for [MS Edge 12-18](https://caniuse.com/#feat=keyboardevent-key).
+
+Note: The `event-submitter-polyfill` package is also required for [MS Edge 12-80 &amp; Safari &lt; 15.4](https://caniuse.com/mdn-api_submitevent_submitter).
 
 ```
 // assets/js/app.js
@@ -149,6 +142,7 @@ import "classlist-polyfill"
 import "new-event-polyfill"
 import "@webcomponents/template"
 import "shim-keyboard-event-key"
+import "event-submitter-polyfill"
 import "core-js/features/set"
 import "core-js/features/url"
 

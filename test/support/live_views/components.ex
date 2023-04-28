@@ -1,5 +1,5 @@
 defmodule Phoenix.LiveViewTest.FunctionComponent do
-  import Phoenix.LiveView.Helpers
+  use Phoenix.Component
 
   def render(assigns) do
     ~H"""
@@ -12,6 +12,161 @@ defmodule Phoenix.LiveViewTest.FunctionComponent do
     COMPONENT:<%= @value %>, Content: <%= render_slot(@inner_block) %>
     """
   end
+end
+
+defmodule Phoenix.LiveViewTest.FunctionComponentWithAttrs do
+  use Phoenix.Component
+
+  defmodule Struct do
+    defstruct []
+  end
+
+  def identity(var), do: var
+  def map_identity(%{} = map), do: map
+
+  attr :attr, :any
+  def fun_attr_any(assigns), do: ~H[]
+
+  attr :attr, :string
+  def fun_attr_string(assigns), do: ~H[]
+
+  attr :attr, :atom
+  def fun_attr_atom(assigns), do: ~H[]
+
+  attr :attr, :boolean
+  def fun_attr_boolean(assigns), do: ~H[]
+
+  attr :attr, :integer
+  def fun_attr_integer(assigns), do: ~H[]
+
+  attr :attr, :float
+  def fun_attr_float(assigns), do: ~H[]
+
+  attr :attr, :map
+  def fun_attr_map(assigns), do: ~H[]
+
+  attr :attr, :list
+  def fun_attr_list(assigns), do: ~H[]
+
+  attr :attr, :global
+  def fun_attr_global(assigns), do: ~H[]
+
+  attr :attr, Struct
+  def fun_attr_struct(assigns), do: ~H[]
+
+  attr :attr, :any, required: true
+  def fun_attr_required(assigns), do: ~H[]
+
+  attr :attr, :any, default: %{}
+  def fun_attr_default(assigns), do: ~H[]
+
+  attr :attr1, :any
+  attr :attr2, :any
+  def fun_multiple_attr(assigns), do: ~H[]
+
+  attr :attr, :any, doc: "attr docs"
+  def fun_with_attr_doc(assigns), do: ~H[]
+
+  attr :attr, :any, default: "foo", doc: "attr docs."
+  def fun_with_attr_doc_period(assigns), do: ~H[]
+
+  attr :attr, :any,
+    default: "foo",
+    doc: """
+    attr docs with bullets:
+
+      * foo
+      * bar
+
+    and that's it.
+    """
+
+  def fun_with_attr_doc_multiline(assigns), do: ~H[]
+
+  attr :attr1, :any
+  attr :attr2, :any, doc: false
+  def fun_with_hidden_attr(assigns), do: ~H[]
+
+  attr :attr, :any
+  @doc "fun docs"
+  def fun_with_doc(assigns), do: ~H[]
+
+  attr :attr, :any
+
+  @doc """
+  fun docs
+  [INSERT LVATTRDOCS]
+  fun docs
+  """
+  def fun_doc_injection(assigns), do: ~H[]
+
+  attr :attr, :any
+  @doc false
+  def fun_doc_false(assigns), do: ~H[]
+
+  attr :attr, :any
+  defp private_fun(assigns), do: ~H[]
+
+  slot :inner_block
+  def fun_slot(assigns), do: ~H[]
+
+  slot :inner_block, doc: "slot docs"
+  def fun_slot_doc(assigns), do: ~H[]
+
+  slot :inner_block, required: true
+  def fun_slot_required(assigns), do: ~H[]
+
+  slot :named, required: true, doc: "a named slot" do
+    attr :attr1, :any, required: true, doc: "a slot attr doc"
+    attr :attr2, :any, doc: "a slot attr doc"
+  end
+
+  def fun_slot_with_attrs(assigns), do: ~H[]
+
+  slot :named, required: true do
+    attr :attr1, :any, required: true, doc: "a slot attr doc"
+    attr :attr2, :any, doc: "a slot attr doc"
+  end
+
+  def fun_slot_no_doc_with_attrs(assigns), do: ~H[]
+
+  slot :named,
+    required: true,
+    doc: """
+    Important slot:
+
+    * for a
+    * for b
+    """ do
+    attr :attr1, :any, required: true, doc: "a slot attr doc"
+    attr :attr2, :any, doc: "a slot attr doc"
+  end
+
+  def fun_slot_doc_multiline_with_attrs(assigns), do: ~H[]
+
+  slot :named, required: true do
+    attr :attr1, :any,
+      required: true,
+      doc: """
+      attr docs with bullets:
+
+        * foo
+        * bar
+
+      and that's it.
+      """
+
+    attr :attr2, :any, doc: "a slot attr doc"
+  end
+
+  def fun_slot_doc_with_attrs_multiline(assigns), do: ~H[]
+
+  attr :attr1, :atom, values: [:foo, :bar, :baz]
+  attr :attr2, :atom, examples: [:foo, :bar, :baz]
+  attr :attr3, :list, values: [[60, 40]]
+  attr :attr4, :list, examples: [[60, 40]]
+
+  def fun_attr_values_examples(assigns), do: ~H[]
 end
 
 defmodule Phoenix.LiveViewTest.StatefulComponent do
@@ -49,7 +204,7 @@ defmodule Phoenix.LiveViewTest.StatefulComponent do
     ~H"""
     <div phx-click="transform" id={@id} phx-target={"#" <> @id <> include_parent_id(@parent_id)}>
       <%= @name %> says hi
-      <%= if @dup_name, do: live_component __MODULE__, id: @dup_name, name: @dup_name %>
+      <%= if @dup_name, do: live_component(__MODULE__, id: @dup_name, name: @dup_name) %>
     </div>
     """
   end
@@ -71,8 +226,8 @@ defmodule Phoenix.LiveViewTest.StatefulComponent do
       "dup" ->
         {:noreply, assign(socket, :dup_name, socket.assigns.name <> "-dup")}
 
-      "push_redirect" ->
-        {:noreply, push_redirect(socket, to: "/components?redirect=push")}
+      "push_navigate" ->
+        {:noreply, push_navigate(socket, to: "/components?redirect=push")}
 
       "push_patch" ->
         {:noreply, push_patch(socket, to: "/components?redirect=patch")}
@@ -136,13 +291,13 @@ defmodule Phoenix.LiveViewTest.WithMultipleTargets do
   def mount(_params, %{"names" => names, "from" => from} = session, socket) do
     {
       :ok,
-      assign(socket, [
+      assign(socket,
         names: names,
         from: from,
         disabled: [],
         message: nil,
         parent_selector: Map.get(session, "parent_selector", "#parent_id")
-      ])
+      )
     }
   end
 
@@ -161,4 +316,24 @@ defmodule Phoenix.LiveViewTest.WithMultipleTargets do
   def handle_event("transform", %{"op" => _op}, socket) do
     {:noreply, assign(socket, :message, "Parent was updated")}
   end
+end
+
+defmodule Phoenix.LiveViewTest.WithLogOverride do
+  use Phoenix.LiveView, log: :warning
+
+  def mount(_params, _session, socket) do
+    {:ok, socket}
+  end
+
+  def render(assigns), do: ~H[]
+end
+
+defmodule Phoenix.LiveViewTest.WithLogDisabled do
+  use Phoenix.LiveView, log: false
+
+  def mount(_params, _session, socket) do
+    {:ok, socket}
+  end
+
+  def render(assigns), do: ~H[]
 end

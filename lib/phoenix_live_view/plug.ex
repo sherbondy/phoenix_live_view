@@ -9,9 +9,7 @@ defmodule Phoenix.LiveView.Plug do
   @impl Plug
   def call(%Plug.Conn{private: %{phoenix_live_view: {view, opts, live_session}}} = conn, _) do
     %{extra: live_session_extra} = live_session
-
     session = live_session(live_session_extra, conn)
-
     opts = Keyword.put(opts, :session, session)
 
     conn

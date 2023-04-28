@@ -64,7 +64,7 @@ defmodule Phoenix.LiveView.Router do
 
     * `:container` - an optional tuple for the HTML tag and DOM attributes to
       be used for the LiveView container. For example: `{:li, style: "color: blue;"}`.
-      See `Phoenix.LiveView.Helpers.live_render/3` for more information and examples.
+      See `Phoenix.Component.live_render/3` for more information and examples.
 
     * `:as` - optionally configures the named helper. Defaults to `:live` when
       using a LiveView without actions or defaults to the LiveView name when using
@@ -143,6 +143,11 @@ defmodule Phoenix.LiveView.Router do
       each LiveView in the session_. See `Phoenix.LiveView.on_mount/1`. Passing a
       single value is also accepted.
 
+    * `:layout` - The optional layout the LiveView will be rendered in. Setting
+      this option overrides the layout via `use Phoenix.LiveView`. This option
+      may be overridden inside a LiveView by returning `{:ok, socket, layout: ...}`
+      from the mount callback
+
   ## Examples
 
       scope "/", MyAppWeb do
@@ -174,13 +179,15 @@ defmodule Phoenix.LiveView.Router do
   pipe through it:
 
       live_session :admin, on_mount: MyAppWeb.AdminLiveAuth do
-        # Regular routes
-        pipe_through [MyAppWeb.AdminPlugAuth]
-        get "/admin/health"
+        scope "/" do
+          # Regular routes
+          pipe_through [MyAppWeb.AdminPlugAuth]
+          get "/admin/health", AdminHealthController, :index
 
-        # Live routes
-        live "/admin", AdminDashboardLive, :index
-        live "/admin/posts", AdminPostLive, :index
+          # Live routes
+          live "/admin", AdminDashboardLive, :index
+          live "/admin/posts", AdminPostLive, :index
+        end
       end
 
   The opposite is also true, if you have regular http routes and you want to
@@ -228,25 +235,22 @@ defmodule Phoenix.LiveView.Router do
       """
     end
 
-    live_sessions = Module.get_attribute(module, :phoenix_live_sessions)
-    existing = Enum.find(live_sessions, fn %{name: existing_name} -> name == existing_name end)
-
-    if existing do
+    if name in Module.get_attribute(module, :phoenix_live_sessions) do
       raise """
       attempting to redefine live_session #{inspect(name)}.
       live_session routes must be declared in a single named block.
       """
     end
 
-    Module.put_attribute(module, :phoenix_live_session_current, %{name: name, extra: extra, vsn: vsn})
-    Module.put_attribute(module, :phoenix_live_sessions, %{name: name, extra: extra, vsn: vsn})
+    current = %{name: name, extra: extra, vsn: vsn}
+    Module.put_attribute(module, :phoenix_live_session_current, current)
+
+    Module.put_attribute(module, :phoenix_live_sessions, name)
   end
 
-  @live_session_opts [:on_mount, :root_layout, :session]
+  @live_session_opts [:layout, :on_mount, :root_layout, :session]
   defp validate_live_session_opts(opts, module, _name) when is_list(opts) do
-    opts
-    |> Keyword.put_new(:session, %{})
-    |> Enum.reduce(%{}, fn
+    Enum.reduce(opts, %{}, fn
       {:session, val}, acc when is_map(val) or (is_tuple(val) and tuple_size(val) == 3) ->
         Map.put(acc, :session, val)
 
@@ -258,10 +262,11 @@ defmodule Phoenix.LiveView.Router do
         """
 
       {:root_layout, {mod, template}}, acc when is_atom(mod) and is_binary(template) ->
-        Map.put(acc, :root_layout, {mod, template})
+        template = Phoenix.LiveView.Utils.normalize_layout(template, "live_session :root_layout")
+        Map.put(acc, :root_layout, {mod, String.to_atom(template)})
 
       {:root_layout, {mod, template}}, acc when is_atom(mod) and is_atom(template) ->
-        Map.put(acc, :root_layout, {mod, "#{template}.html"})
+        Map.put(acc, :root_layout, {mod, template})
 
       {:root_layout, false}, acc ->
         Map.put(acc, :root_layout, false)
@@ -269,6 +274,23 @@ defmodule Phoenix.LiveView.Router do
       {:root_layout, bad_layout}, _acc ->
         raise ArgumentError, """
         invalid live_session :root_layout
+
+        expected a tuple with the view module and template string or atom name, got #{inspect(bad_layout)}
+        """
+
+      {:layout, {mod, template}}, acc when is_atom(mod) and is_binary(template) ->
+        template = Phoenix.LiveView.Utils.normalize_layout(template, "live_session :layout")
+        Map.put(acc, :layout, {mod, template})
+
+      {:layout, {mod, template}}, acc when is_atom(mod) and is_atom(template) ->
+        Map.put(acc, :layout, {mod, template})
+
+      {:layout, false}, acc ->
+        Map.put(acc, :layout, false)
+
+      {:layout, bad_layout}, _acc ->
+        raise ArgumentError, """
+        invalid live_session :layout
 
         expected a tuple with the view module and template string or atom name, got #{inspect(bad_layout)}
         """
@@ -334,10 +356,10 @@ defmodule Phoenix.LiveView.Router do
       when is_atom(action) and is_list(opts) do
     live_session =
       Module.get_attribute(router, :phoenix_live_session_current) ||
-        %{name: :default, extra: %{session: %{}}, vsn: session_vsn(router)}
+        %{name: :default, extra: %{}, vsn: session_vsn(router)}
 
     live_view = Phoenix.Router.scoped_alias(router, live_view)
-    {private, metadata, opts} = validate_live_opts!(opts)
+    {private, metadata, warn_on_verify, opts} = validate_live_opts!(opts)
 
     opts =
       opts
@@ -355,6 +377,7 @@ defmodule Phoenix.LiveView.Router do
     {as_action,
      alias: false,
      as: as_helper,
+     warn_on_verify: warn_on_verify,
      private: Map.put(private, :phoenix_live_view, {live_view, opts, live_session}),
      metadata: metadata}
   end
@@ -362,6 +385,7 @@ defmodule Phoenix.LiveView.Router do
   defp validate_live_opts!(opts) do
     {private, opts} = Keyword.pop(opts, :private, %{})
     {metadata, opts} = Keyword.pop(opts, :metadata, %{})
+    {warn_on_verify, opts} = Keyword.pop(opts, :warn_on_verify, false)
 
     Enum.each(opts, fn
       {:container, {tag, attrs}} when is_atom(tag) and is_list(attrs) ->
@@ -392,13 +416,13 @@ defmodule Phoenix.LiveView.Router do
         raise ArgumentError, """
         unknown live option :#{key}.
 
-        Supported options include: :container, :as, :metadata, :private.
+        Supported options include: :container, :as, :metadata, :private, :warn_on_verify.
 
         Got: #{inspect([{key, val}])}
         """
     end)
 
-    {private, metadata, opts}
+    {private, metadata, warn_on_verify, opts}
   end
 
   defp inferred_as(live_view, as, nil), do: {as || :live, live_view}

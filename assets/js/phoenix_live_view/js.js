@@ -1,4 +1,7 @@
 import DOM from "./dom"
+import ARIA from "./aria"
+
+let focusStack = null
 
 let JS = {
   exec(eventType, phxEvent, view, sourceEl, defaults){
@@ -24,6 +27,15 @@ let JS = {
 
   // commands
 
+  exec_exec(eventType, phxEvent, view, sourceEl, el, [attr, to]){
+    let nodes = to ? DOM.all(document, to) : [sourceEl]
+    nodes.forEach(node => {
+      let encodedJS = node.getAttribute(attr)
+      if(!encodedJS){ throw new Error(`expected ${attr} to contain JS command on "${to}"`) }
+      view.liveSocket.execJS(node, encodedJS, eventType)
+    })
+  },
+
   exec_dispatch(eventType, phxEvent, view, sourceEl, el, {to, event, detail, bubbles}){
     detail = detail || {}
     detail.dispatcher = sourceEl
@@ -40,14 +52,42 @@ let JS = {
     view.withinTargets(phxTarget, (targetView, targetCtx) => {
       if(eventType === "change"){
         let {newCid, _target, callback} = args
-        _target = _target || (sourceEl instanceof HTMLInputElement ? sourceEl.name : undefined)
+        _target = _target || (DOM.isFormInput(sourceEl) ? sourceEl.name : undefined)
         if(_target){ pushOpts._target = _target }
         targetView.pushInput(sourceEl, targetCtx, newCid, event || phxEvent, pushOpts, callback)
       } else if(eventType === "submit"){
-        targetView.submitForm(sourceEl, targetCtx, event || phxEvent, pushOpts)
+        let {submitter} = args
+        targetView.submitForm(sourceEl, targetCtx, event || phxEvent, submitter, pushOpts)
       } else {
         targetView.pushEvent(eventType, sourceEl, targetCtx, event || phxEvent, data, pushOpts)
       }
+    })
+  },
+
+  exec_navigate(eventType, phxEvent, view, sourceEl, el, {href, replace}){
+    view.liveSocket.historyRedirect(href, replace ? "replace" : "push")
+  },
+
+  exec_patch(eventType, phxEvent, view, sourceEl, el, {href, replace}){
+    view.liveSocket.pushHistoryPatch(href, replace ? "replace" : "push", sourceEl)
+  },
+
+  exec_focus(eventType, phxEvent, view, sourceEl, el){
+    window.requestAnimationFrame(() => ARIA.attemptFocus(el))
+  },
+
+  exec_focus_first(eventType, phxEvent, view, sourceEl, el){
+    window.requestAnimationFrame(() => ARIA.focusFirstInteractive(el) || ARIA.focusFirst(el))
+  },
+
+  exec_push_focus(eventType, phxEvent, view, sourceEl, el){
+    window.requestAnimationFrame(() => focusStack = el || sourceEl)
+  },
+
+  exec_pop_focus(eventType, phxEvent, view, sourceEl, el){
+    window.requestAnimationFrame(() => {
+      if(focusStack){ focusStack.focus() }
+      focusStack = null
     })
   },
 
@@ -60,10 +100,7 @@ let JS = {
   },
 
   exec_transition(eventType, phxEvent, view, sourceEl, el, {time, transition}){
-    let [transition_start, running, transition_end] = transition
-    let onStart = () => this.addOrRemoveClasses(el, transition_start.concat(running), [])
-    let onDone = () => this.addOrRemoveClasses(el, transition_end, transition_start.concat(running))
-    view.transition(time, onStart, onDone)
+    this.addOrRemoveClasses(el, [], [], transition, time, view)
   },
 
   exec_toggle(eventType, phxEvent, view, sourceEl, el, {display, ins, outs, time}){
@@ -122,7 +159,8 @@ let JS = {
         if(eventType === "remove"){ return }
         let onStart = () => {
           this.addOrRemoveClasses(el, inStartClasses, outClasses.concat(outStartClasses).concat(outEndClasses))
-          DOM.putSticky(el, "toggle", currentEl => currentEl.style.display = (display || "block"))
+          let stickyDisplay = display || this.defaultDisplay(el)
+          DOM.putSticky(el, "toggle", currentEl => currentEl.style.display = stickyDisplay)
           window.requestAnimationFrame(() => {
             this.addOrRemoveClasses(el, inClasses, [])
             window.requestAnimationFrame(() => this.addOrRemoveClasses(el, inEndClasses, inStartClasses))
@@ -144,7 +182,8 @@ let JS = {
       } else {
         window.requestAnimationFrame(() => {
           el.dispatchEvent(new Event("phx:show-start"))
-          DOM.putSticky(el, "toggle", currentEl => currentEl.style.display = display || "block")
+          let stickyDisplay = display || this.defaultDisplay(el)
+          DOM.putSticky(el, "toggle", currentEl => currentEl.style.display = stickyDisplay)
           el.dispatchEvent(new Event("phx:show-end"))
         })
       }
@@ -195,6 +234,10 @@ let JS = {
 
   filterToEls(sourceEl, {to}){
     return to ? DOM.all(document, to) : [sourceEl]
+  },
+
+  defaultDisplay(el){
+    return {tr: "table-row", td: "table-cell"}[el.tagName.toLowerCase()] || "block"
   }
 }
 

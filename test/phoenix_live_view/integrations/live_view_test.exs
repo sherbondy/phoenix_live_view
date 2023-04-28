@@ -1,5 +1,5 @@
 defmodule Phoenix.LiveView.LiveViewTest do
-  use ExUnit.Case, async: true
+  use ExUnit.Case, async: false
 
   import Phoenix.ConnTest
   import Phoenix.LiveViewTest
@@ -130,6 +130,11 @@ defmodule Phoenix.LiveView.LiveViewTest do
       assert html =~ "The temp is: 1"
       assert html =~ "O'Connor" |> HTML.html_escape() |> HTML.safe_to_string()
     end
+
+    test "live render with container giving class as list", %{conn: conn} do
+      {:ok, _view, html} = live(conn, "/classlist")
+      assert html =~ ~s|class="foo bar"|
+    end
   end
 
   describe "render_*" do
@@ -195,7 +200,7 @@ defmodule Phoenix.LiveView.LiveViewTest do
       {:ok, view, connected_html} = live(conn)
 
       assert static_html =~
-               ~r/<article class="thermo"[^>]*data-phx-main=\"true\".*[^>]*>/
+               ~r/<article class="thermo"[^>]*data-phx-main.*[^>]*>/
 
       assert static_html =~ ~r/<\/article>/
 
@@ -383,6 +388,28 @@ defmodule Phoenix.LiveView.LiveViewTest do
 
       assert_receive {^ref, transport_pid}
       assert transport_pid == self()
+    end
+  end
+
+  describe "connected mount exceptions" do
+    test "when disconnected, raises normally per plug wrapper", %{conn: conn} do
+      assert_raise(Plug.Conn.WrapperError, ~r/Phoenix.LiveViewTest.ThermostatLive.Error/, fn ->
+        get(conn, "/thermo?raise_disconnected=500")
+      end)
+
+      assert_raise(Plug.Conn.WrapperError, ~r/Phoenix.LiveViewTest.ThermostatLive.Error/, fn ->
+        get(conn, "/thermo?raise_disconnected=404")
+      end)
+    end
+
+    test "when connected, raises and exits for 5xx", %{conn: conn} do
+      assert {{exception, _}, _} = catch_exit(live(conn, "/thermo?raise_connected=500"))
+      assert %Phoenix.LiveViewTest.ThermostatLive.Error{plug_status: 500} = exception
+    end
+
+    test "when connected, raises and wraps 4xx in client response", %{conn: conn} do
+      assert {reason, _} = catch_exit(live(conn, "/thermo?raise_connected=404"))
+      assert %{reason: "reload", status: 404} = reason
     end
   end
 end

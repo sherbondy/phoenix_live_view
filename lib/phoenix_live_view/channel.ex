@@ -5,7 +5,7 @@ defmodule Phoenix.LiveView.Channel do
   require Logger
 
   alias Phoenix.LiveView.{Socket, Utils, Diff, Upload, UploadConfig, Route, Session, Lifecycle}
-  alias Phoenix.Socket.Message
+  alias Phoenix.Socket.{Broadcast, Message}
 
   @prefix :phoenix
   @not_mounted_at_router :not_mounted_at_router
@@ -97,6 +97,11 @@ defmodule Phoenix.LiveView.Channel do
         |> view_handle_info(socket)
         |> handle_result({:handle_info, 2, nil}, state)
     end
+  end
+
+  def handle_info(%Broadcast{event: "phx_drain"}, state) do
+    send(state.socket.transport_pid, :socket_drain)
+    {:stop, {:shutdown, :draining}, state}
   end
 
   def handle_info(%Message{topic: topic, event: "phx_leave"} = msg, %{topic: topic} = state) do
@@ -238,7 +243,7 @@ defmodule Phoenix.LiveView.Channel do
       :noop ->
         {module, id, _} = update
 
-        if function_exported?(module, :__info__, 1) do
+        if exported?(module, :__info__, 1) do
           # Only a warning, because there can be race conditions where a component is removed before a `send_update` happens.
           Logger.debug(
             "send_update failed because component #{inspect(module)} with ID #{inspect(id)} does not exist or it has been removed"
@@ -253,6 +258,17 @@ defmodule Phoenix.LiveView.Channel do
 
   def handle_info({@prefix, :redirect, command, flash}, state) do
     handle_redirect(state, command, flash, nil)
+  end
+
+  def handle_info({:phoenix_live_reload, _topic, _changed_file}, %{socket: socket} = state) do
+    Phoenix.CodeReloader.reload(socket.endpoint)
+
+    new_socket =
+      Enum.reduce(socket.assigns, socket, fn {key, val}, socket ->
+        Utils.force_assign(socket, key, val)
+      end)
+
+    handle_changed(state, new_socket, nil)
   end
 
   def handle_info(msg, %{socket: socket} = state) do
@@ -316,24 +332,24 @@ defmodule Phoenix.LiveView.Channel do
 
     [
       data: [
-        {'LiveView', view},
-        {'Parent pid', parent_pid},
-        {'Transport pid', transport_pid},
-        {'Topic', topic},
-        {'Components count', map_size(cid_to_component)}
+        {~c"LiveView", view},
+        {~c"Parent pid", parent_pid},
+        {~c"Transport pid", transport_pid},
+        {~c"Topic", topic},
+        {~c"Components count", map_size(cid_to_component)}
       ]
     ]
   end
 
   def format_status(_, [_pdict, state]) do
-    [data: [{'State', state}]]
+    [data: [{~c"State", state}]]
   end
 
   @impl true
   def terminate(reason, %{socket: socket}) do
     %{view: view} = socket
 
-    if function_exported?(view, :terminate, 2) do
+    if exported?(view, :terminate, 2) do
       view.terminate(reason, socket)
     else
       :ok
@@ -348,7 +364,7 @@ defmodule Phoenix.LiveView.Channel do
   def code_change(old, %{socket: socket} = state, extra) do
     %{view: view} = socket
 
-    if function_exported?(view, :code_change, 3) do
+    if exported?(view, :code_change, 3) do
       view.code_change(old, socket, extra)
     else
       {:ok, state}
@@ -378,6 +394,9 @@ defmodule Phoenix.LiveView.Channel do
           {:halt, %Socket{} = socket} ->
             {{:noreply, socket}, %{socket: socket, event: event, params: val}}
 
+          {:halt, reply, %Socket{} = socket} ->
+            {{:reply, reply, socket}, %{socket: socket, event: event, params: val}}
+
           {:cont, %Socket{} = socket} ->
             case socket.view.handle_event(event, val, socket) do
               {:noreply, %Socket{} = socket} ->
@@ -395,15 +414,26 @@ defmodule Phoenix.LiveView.Channel do
   end
 
   defp view_handle_info(msg, %{view: view} = socket) do
-    exported? = function_exported?(view, :handle_info, 2)
+    exported? = exported?(view, :handle_info, 2)
 
     case Lifecycle.handle_info(msg, socket) do
       {:cont, %Socket{} = socket} when exported? ->
         view.handle_info(msg, socket)
 
+      {:cont, %Socket{} = socket} when not exported? ->
+        Logger.debug(
+          "warning: undefined handle_info in #{inspect(view)}. Unhandled message: #{inspect(msg)}"
+        )
+
+        {:noreply, socket}
+
       {_, %Socket{} = socket} ->
         {:noreply, socket}
     end
+  end
+
+  defp exported?(m, f, a) do
+    function_exported?(m, f, a) || (Code.ensure_loaded?(m) && function_exported?(m, f, a))
   end
 
   defp maybe_call_mount_handle_params(%{socket: socket} = state, router, url, params) do
@@ -800,13 +830,21 @@ defmodule Phoenix.LiveView.Channel do
     {socket, diff, components} =
       if force? or Utils.changed?(socket) do
         rendered = Utils.to_rendered(socket, socket.view)
-        Diff.render(socket, rendered, state.components)
+        {socket, diff, components} = Diff.render(socket, rendered, state.components)
+
+        socket =
+          socket
+          |> Lifecycle.after_render()
+          |> Utils.clear_changed()
+
+        {socket, diff, components}
       else
         {socket, %{}, state.components}
       end
 
     diff = Diff.render_private(socket, diff)
-    {:diff, diff, %{state | socket: Utils.clear_changed(socket), components: components}}
+    new_socket = Utils.clear_temp(socket)
+    {:diff, diff, %{state | socket: new_socket, components: components}}
   end
 
   defp reply(state, {ref, extra}, status, payload) do
@@ -866,7 +904,7 @@ defmodule Phoenix.LiveView.Channel do
 
             5) Define the CSRF meta tag inside the `<head>` tag in your layout:
 
-                <%= csrf_meta_tag() %>
+                <meta name="csrf-token" content={Plug.CSRFProtection.get_csrf_token()} />
 
             6) Pass it forward in your app.js:
 
@@ -947,9 +985,6 @@ defmodule Phoenix.LiveView.Channel do
       router: router
     } = verified
 
-    live_session_on_mount = load_live_session_on_mount(route)
-    lifecycle = lifecycle(config, live_session_on_mount)
-
     %Phoenix.Socket{
       endpoint: endpoint,
       transport_pid: transport_pid
@@ -992,16 +1027,31 @@ defmodule Phoenix.LiveView.Channel do
       end
 
     merged_session = Map.merge(socket_session, verified_user_session)
+    lifecycle = load_lifecycle(config, route)
 
     case mount_private(parent, root_view, assign_new, connect_params, connect_info, lifecycle) do
       {:ok, mount_priv} ->
         socket = Utils.configure_socket(socket, mount_priv, action, flash, host_uri)
 
-        socket
-        |> Utils.maybe_call_live_view_mount!(view, params, merged_session, url)
-        |> build_state(phx_socket)
-        |> maybe_call_mount_handle_params(router, url, params)
-        |> reply_mount(from, verified, route)
+        try do
+          socket
+          |> load_layout(route)
+          |> Utils.maybe_call_live_view_mount!(view, params, merged_session, url)
+          |> build_state(phx_socket)
+          |> maybe_call_mount_handle_params(router, url, params)
+          |> reply_mount(from, verified, route)
+          |> maybe_subscribe_to_live_reload()
+        rescue
+          exception ->
+            status = Plug.Exception.status(exception)
+
+            if status >= 400 and status < 500 do
+              GenServer.reply(from, {:error, %{reason: "reload", status: status}})
+              {:stop, :shutdown, :no_state}
+            else
+              reraise(exception, __STACKTRACE__)
+            end
+        end
 
       {:error, :noproc} ->
         GenServer.reply(from, {:error, %{reason: "stale"}})
@@ -1033,13 +1083,23 @@ defmodule Phoenix.LiveView.Channel do
     end
   end
 
-  defp load_live_session_on_mount(%Route{live_session: %{extra: %{on_mount: hooks}}}), do: hooks
-  defp load_live_session_on_mount(_), do: []
+  defp load_lifecycle(
+         %{lifecycle: lifecycle},
+         %Route{live_session: %{extra: %{on_mount: on_mount}}}
+       ) do
+    update_in(lifecycle.mount, &(on_mount ++ &1))
+  end
 
-  defp lifecycle(%{lifecycle: lifecycle}, []), do: lifecycle
+  defp load_lifecycle(%{lifecycle: lifecycle}, _) do
+    lifecycle
+  end
 
-  defp lifecycle(%{lifecycle: lifecycle}, on_mount) do
-    %{lifecycle | mount: on_mount ++ lifecycle.mount}
+  defp load_layout(socket, %Route{live_session: %{extra: %{layout: layout}}}) do
+    put_in(socket.private[:live_layout], layout)
+  end
+
+  defp load_layout(socket, _route) do
+    socket
   end
 
   defp mount_private(nil, root_view, assign_new, connect_params, connect_info, lifecycle) do
@@ -1050,7 +1110,7 @@ defmodule Phoenix.LiveView.Channel do
        assign_new: {%{}, assign_new},
        lifecycle: lifecycle,
        root_view: root_view,
-       __changed__: %{}
+       __temp__: %{}
      }}
   end
 
@@ -1063,10 +1123,10 @@ defmodule Phoenix.LiveView.Channel do
            connect_params: connect_params,
            connect_info: connect_info,
            assign_new: {parent_assigns, assign_new},
-           phoenix_live_layout: false,
+           live_layout: false,
            lifecycle: lifecycle,
            root_view: root_view,
-           __changed__: %{}
+           __temp__: %{}
          }}
 
       {:error, :noproc} ->
@@ -1075,8 +1135,6 @@ defmodule Phoenix.LiveView.Channel do
   end
 
   defp sync_with_parent(parent, assign_new) do
-    _ref = Process.monitor(parent)
-
     try do
       GenServer.call(parent, {@prefix, :child_mount, self(), assign_new})
     catch
@@ -1087,13 +1145,23 @@ defmodule Phoenix.LiveView.Channel do
   defp put_container(%Session{} = session, %Route{} = route, %{} = diff) do
     if container = session.redirected? && Route.container(route) do
       {tag, attrs} = container
-      Map.put(diff, :container, [tag, Enum.into(attrs, %{})])
+
+      attrs = attrs |> resolve_class_attribute_as_list() |> Enum.into(%{})
+
+      Map.put(diff, :container, [tag, attrs])
     else
       diff
     end
   end
 
   defp put_container(%Session{}, nil = _route, %{} = diff), do: diff
+
+  defp resolve_class_attribute_as_list(attrs) do
+    case attrs[:class] do
+      c when is_list(c) -> Keyword.put(attrs, :class, Enum.join(c, " "))
+      _ -> attrs
+    end
+  end
 
   defp reply_mount(result, from, %Session{} = session, route) do
     case result do
@@ -1138,7 +1206,7 @@ defmodule Phoenix.LiveView.Channel do
   end
 
   defp assign_action(socket, action) do
-    Phoenix.LiveView.assign(socket, :live_action, action)
+    Phoenix.LiveView.Utils.assign(socket, :live_action, action)
   end
 
   defp maybe_update_uploads(%Socket{} = socket, %{"uploads" => uploads} = payload) do
@@ -1292,4 +1360,16 @@ defmodule Phoenix.LiveView.Channel do
       _ -> nil
     end
   end
+
+  defp maybe_subscribe_to_live_reload({:noreply, state}) do
+    live_reload_config = state.socket.endpoint.config(:live_reload)
+
+    if live_reload_config[:notify][:live_view] do
+      state.socket.endpoint.subscribe("live_view")
+    end
+
+    {:noreply, state}
+  end
+
+  defp maybe_subscribe_to_live_reload(response), do: response
 end

@@ -1,14 +1,56 @@
 defmodule Phoenix.LiveViewTest do
   @moduledoc ~S'''
-  Conveniences for testing Phoenix LiveViews.
+  Conveniences for testing function components as well as
+  LiveViews and LiveComponents.
 
-  In LiveView tests, we interact with views via process
-  communication in substitution of a browser. Like a browser,
-  our test process receives messages about the rendered updates
-  from the view which can be asserted against to test the
-  life-cycle and behavior of LiveViews and their children.
+  ## Testing function components
 
-  ## LiveView Testing
+  There are two mechanisms for testing function components. Imagine the
+  following component:
+
+      def greet(assigns) do
+        ~H"""
+        <div>Hello, <%= @name %>!</div>
+        """
+      end
+
+  You can test it by using `render_component/3`, passing the function
+  reference to the component as first argument:
+
+      import Phoenix.LiveViewTest
+
+      test "greets" do
+        assert render_component(&MyComponents.greet/1, name: "Mary") ==
+                 "<div>Hello, Mary!</div>"
+      end
+
+  However, for complex components, often the simplest way to test them
+  is by using the `~H` sigil itself:
+
+      import Phoenix.Component
+      import Phoenix.LiveViewTest
+
+      test "greets" do
+        assigns = %{}
+        assert rendered_to_string(~H"""
+               <MyComponents.greet name="Mary" />
+               """) ==
+                 "<div>Hello, Mary!</div>"
+      end
+
+  The difference is that we use `rendered_to_string/1` to convert the rendered
+  template to a string for testing.
+
+  ## Testing LiveViews and LiveComponents
+
+  In LiveComponents and LiveView tests, we interact with views
+  via process communication in substitution of a browser.
+  Like a browser, our test process receives messages about the
+  rendered updates from the view which can be asserted against
+  to test the life-cycle and behavior of LiveViews and their
+  children.
+
+  ### Testing LiveViews
 
   The life-cycle of a LiveView as outlined in the `Phoenix.LiveView`
   docs details how a view starts as a stateless HTML render in a disconnected
@@ -110,49 +152,11 @@ defmodule Phoenix.LiveViewTest do
       send(view.pid, {:set_temp, 50})
       assert render(view) =~ "The temperature is: 50℉"
 
-  ## Testing function components
+  ### Testing LiveComponents
 
-  There are two mechanisms for testing function components. Imagine the
-  following component:
-
-      def greet(assigns) do
-        ~H"""
-        <div>Hello, <%= @name %>!</div>
-        """
-      end
-
-  You can test it by using `render_component/3`, passing the function
-  reference to the component as first argument:
-
-      import Phoenix.LiveViewTest
-
-      test "greets" do
-        assert render_component(&MyComponents.greet/1, name: "Mary") ==
-                 "<div>Hello, Mary!</div>"
-      end
-
-  However, for complex components, often the simplest way to test them
-  is by using the `~H` sigil itself:
-
-      import Phoenix.LiveView.Helpers
-      import Phoenix.LiveViewTest
-
-      test "greets" do
-        assigns = []
-        assert rendered_to_string(~H"""
-               <MyComponents.greet name="Mary" />
-               """) ==
-                 "<div>Hello, Mary!</div>"
-      end
-
-  The difference is that we use `rendered_to_string` to convert the rendered
-  template to a string for testing.
-
-  ## Testing stateful components
-
-  There are two main mechanisms for testing stateful components. You can
-  use `render_component/2` to test how a component is mounted and rendered
-  once:
+  LiveComponents can be tested in two ways. One way is to use the same
+  `render_component/2` function as function components. This will mount
+  the LiveComponent and render it once, without testing any of its events:
 
       assert render_component(MyComponent, id: 123, user: %User{}) =~
                "some markup in component"
@@ -241,7 +245,7 @@ defmodule Phoenix.LiveViewTest do
     * `:session` - the session to be given to the LiveView
 
   All other options are forwarded to the LiveView for rendering. Refer to
-  `Phoenix.LiveView.Helpers.live_render/3` for a list of supported render
+  `Phoenix.Component.live_render/3` for a list of supported render
   options.
 
   ## Examples
@@ -358,7 +362,7 @@ defmodule Phoenix.LiveViewTest do
     to = hd(Plug.Conn.get_resp_header(conn, "location"))
 
     opts =
-      if flash = conn.private[:phoenix_flash] do
+      if flash = conn.assigns[:flash] || conn.private[:phoenix_flash] do
         %{to: to, flash: flash}
       else
         %{to: to}
@@ -402,20 +406,10 @@ defmodule Phoenix.LiveViewTest do
     end
   end
 
-  # TODO: replace with ExUnit.Case.fetch_test_supervisor!() when we require Elixir v1.11.
   defp fetch_test_supervisor!() do
-    case ExUnit.OnExitHandler.get_supervisor(self()) do
-      {:ok, nil} ->
-        opts = [strategy: :one_for_one, max_restarts: 1_000_000, max_seconds: 1]
-        {:ok, sup} = Supervisor.start_link([], opts)
-        ExUnit.OnExitHandler.put_supervisor(self(), sup)
-        sup
-
-      {:ok, sup} ->
-        sup
-
-      :error ->
-        raise ArgumentError, "fetch_test_supervisor!/0 can only be invoked from the test process"
+    case ExUnit.fetch_test_supervisor() do
+      {:ok, sup} -> sup
+      :error -> raise ArgumentError, "LiveView helpers can only be invoked from the test process"
     end
   end
 
@@ -476,7 +470,6 @@ defmodule Phoenix.LiveViewTest do
 
     assigns =
       Map.new(assigns)
-      |> Map.put_new(:__changed__, %{})
 
     # TODO: Make the ID required once we support only stateful module components as live_component
     mount_assigns = if assigns[:id], do: %{myself: %Phoenix.LiveComponent.CID{cid: -1}}, else: %{}
@@ -505,14 +498,17 @@ defmodule Phoenix.LiveViewTest do
   Converts a rendered template to a string.
 
   ## Examples
-      
-      iex> import Phoenix.LiveView.Helpers
-      iex> assigns = []
-      iex> ~H"""
-      ...> <div>example</div>
-      ...> """
-      ...> |> rendered_to_string()
-      "<div>example</div>"
+
+      import Phoenix.Component
+      import Phoenix.LiveViewTest
+
+      test "greets" do
+        assigns = %{}
+        assert rendered_to_string(~H"""
+               <MyComponents.greet name="Mary" />
+               """) ==
+                 "<div>Hello, Mary!</div>"
+      end
 
   '''
   def rendered_to_string(rendered) do
@@ -531,7 +527,7 @@ defmodule Phoenix.LiveViewTest do
   entries in the element are sent as values. Extra values can be given
   with the `value` argument.
 
-  If the element is does not have a `phx-click` attribute but it is
+  If the element does not have a `phx-click` attribute but it is
   a link (the `<a>` tag), the link will be followed accordingly:
 
     * if the link is a `live_patch`, the current view will be patched
@@ -1495,7 +1491,7 @@ defmodule Phoenix.LiveViewTest do
   tuple.
 
   Imagine you have a LiveView that redirects on a `render_click`
-  event. You can make it sure it immediately redirects after the
+  event. You can make sure it immediately redirects after the
   `render_click` action by calling `follow_redirect/3`:
 
       live_view
@@ -1648,18 +1644,55 @@ defmodule Phoenix.LiveViewTest do
   """
   defmacro follow_trigger_action(form, conn) do
     quote bind_quoted: binding() do
-      {method, path, form_data} = Phoenix.LiveViewTest.__render_trigger_event__(form)
+      {method, path, form_data} =
+        Phoenix.LiveViewTest.__render_trigger_submit__(
+          form,
+          :follow_trigger_action,
+          "phx-trigger-action",
+          "could not follow trigger action because form #{inspect(form.selector)} " <>
+            "does not have a phx-trigger-action attribute"
+        )
+
       dispatch(conn, @endpoint, method, path, form_data)
     end
   end
 
-  def __render_trigger_event__(%Element{} = form) do
+  @doc """
+  Receives a form element and submits the HTTP request through the plug pipeline.
+
+  Imagine you have a LiveView that validates form data, but submits the form to
+  a controller via the normal form `action` attribute. This is especially useful
+  in scenarios where the result of a form submit needs to write to the plug session.
+
+  You can follow submit the form with the `%Plug.Conn{}`, like this:
+
+      form = form(live_view, selector, %{"form" => "data"})
+
+      # Now submit the LiveView form to the plug pipeline
+      conn = submit_form(form, conn)
+      assert conn.method == "POST"
+      assert conn.params == %{"form" => "data"}
+  """
+  defmacro submit_form(form, conn) do
+    quote bind_quoted: binding() do
+      {method, path, form_data} =
+        Phoenix.LiveViewTest.__render_trigger_submit__(
+          form,
+          :submit_form,
+          "action",
+          "could not submit form because form #{inspect(form.selector)} " <>
+            "does not have an action attribute"
+        )
+
+      dispatch(conn, @endpoint, method, path, form_data)
+    end
+  end
+
+  def __render_trigger_submit__(%Element{} = form, name, required_attr, error_msg) do
     case render_tree(form) do
       {"form", attrs, _child_nodes} ->
-        unless List.keymember?(attrs, "phx-trigger-action", 0) do
-          raise ArgumentError,
-                "could not follow trigger action because form #{inspect(form.selector)} " <>
-                  "does not have phx-trigger-action attribute, got: #{inspect(attrs)}"
+        unless List.keymember?(attrs, required_attr, 0) do
+          raise ArgumentError, error_msg <> ", got: #{inspect(attrs)}"
         end
 
         {"action", path} = List.keyfind(attrs, "action", 0) || {"action", call(form, :url)}
@@ -1668,7 +1701,7 @@ defmodule Phoenix.LiveViewTest do
 
       {tag, _, _} ->
         raise ArgumentError,
-              "could not follow trigger action because given element did not return a form, " <>
+              "could not #{name} because given element did not return a form, " <>
                 "got #{inspect(tag)} instead"
     end
   end
@@ -1709,6 +1742,9 @@ defmodule Phoenix.LiveViewTest do
 
       assert render_upload(avatar, "myfile.jpeg", 49) =~ "49%"
       assert render_upload(avatar, "myfile.jpeg", 51) =~ "100%"
+
+  Before making assertions about the how the upload is consumed server-side,
+  you will need to call `render_submit/1`.
   """
   def render_upload(%Upload{} = upload, entry_name, percent \\ 100) do
     if UploadClient.allow_acknowledged?(upload) do

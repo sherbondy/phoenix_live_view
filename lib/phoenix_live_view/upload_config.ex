@@ -15,6 +15,7 @@ defmodule Phoenix.LiveView.UploadEntry do
             done?: false,
             cancelled?: false,
             client_name: nil,
+            client_relative_path: nil,
             client_size: nil,
             client_type: nil,
             client_last_modified: nil
@@ -29,6 +30,7 @@ defmodule Phoenix.LiveView.UploadEntry do
           done?: boolean(),
           cancelled?: boolean(),
           client_name: String.t() | nil,
+          client_relative_path: String.t() | nil,
           client_size: integer() | nil,
           client_type: String.t() | nil,
           client_last_modified: integer() | nil
@@ -62,20 +64,18 @@ defmodule Phoenix.LiveView.UploadConfig do
 
   @too_many_files :too_many_files
 
-  if Version.match?(System.version(), ">= 1.8.0") do
-    @derive {Inspect,
-             only: [
-               :name,
-               :ref,
-               :entries,
-               :max_entries,
-               :max_file_size,
-               :accept,
-               :errors,
-               :auto_upload?,
-               :progress_event
-             ]}
-  end
+  @derive {Inspect,
+           only: [
+             :name,
+             :ref,
+             :entries,
+             :max_entries,
+             :max_file_size,
+             :accept,
+             :errors,
+             :auto_upload?,
+             :progress_event
+           ]}
 
   defstruct name: nil,
             cid: :unregistered,
@@ -128,7 +128,7 @@ defmodule Phoenix.LiveView.UploadConfig do
   # we require a random_ref in order to ensure unique calls to `allow_upload`
   # invalidate old uploads on the client and expire old tokens for the same
   # upload name
-  def build(name, random_ref, [_ | _] = opts) when is_atom(name) do
+  def build(name, random_ref, [_ | _] = opts) when is_atom(name) or is_binary(name) do
     {html_accept, acceptable_types, acceptable_exts} =
       case Keyword.fetch(opts, :accept) do
         {:ok, [_ | _] = accept} ->
@@ -519,6 +519,7 @@ defmodule Phoenix.LiveView.UploadConfig do
       upload_ref: conf.ref,
       upload_config: conf.name,
       client_name: Map.fetch!(client_entry, "name"),
+      client_relative_path: Map.get(client_entry, "relative_path"),
       client_size: Map.fetch!(client_entry, "size"),
       client_type: Map.fetch!(client_entry, "type"),
       client_last_modified: Map.get(client_entry, "last_modified")

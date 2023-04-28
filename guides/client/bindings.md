@@ -20,8 +20,9 @@ callback, for example:
 | [Form Events](form-bindings.md) | `phx-change`, `phx-submit`, `phx-feedback-for`, `phx-disable-with`, `phx-trigger-action`, `phx-auto-recover` |
 | [Focus Events](#focus-and-blur-events) | `phx-blur`, `phx-focus`, `phx-window-blur`, `phx-window-focus` |
 | [Key Events](#key-events) | `phx-keydown`, `phx-keyup`, `phx-window-keydown`, `phx-window-keyup`, `phx-key` |
-| [DOM Patching](dom-patching.md) | `phx-update`, `phx-remove` |
+| [DOM Patching](dom-patching.md) | `phx-mounted`, `phx-update`, `phx-remove` |
 | [JS Interop](js-interop.md#client-hooks) | `phx-hook` |
+| [Lifecycle Events](#lifecycle-events) | `phx-mounted`, `phx-disconnected`, `phx-connected` |
 | [Rate Limiting](#rate-limiting-events-with-debounce-and-throttle) | `phx-debounce`, `phx-throttle` |
 | [Static tracking](`Phoenix.LiveView.static_changed?/1`) | `phx-track-static` |
 
@@ -157,18 +158,21 @@ for example:
 ## Rate limiting events with Debounce and Throttle
 
 All events can be rate-limited on the client by using the
-`phx-debounce` and `phx-throttle` bindings, with the following behavior:
+`phx-debounce` and `phx-throttle` bindings, with the exception of the `phx-blur`
+binding, which is fired immediately.
+
+Rate limited and debounced events have the following behavior:
 
   * `phx-debounce` - Accepts either an integer timeout value (in milliseconds),
     or `"blur"`. When an integer is provided, emitting the event is delayed by
     the specified milliseconds. When `"blur"` is provided, emitting the event is
-    delayed until the field is blurred by the user. Debouncing is typically used for
-    input elements.
+    delayed until the field is blurred by the user. When the value is omitted
+    a default of 300ms is used. Debouncing is typically used for input elements.
 
   * `phx-throttle` - Accepts an integer timeout value to throttle the event in milliseconds.
     Unlike debounce, throttle will immediately emit the event, then rate limit it at once
-    per provided timeout. Throttling is typically used to rate limit clicks, mouse and
-    keyboard actions.
+    per provided timeout. When the value is omitted a default of 300ms is used.
+    Throttling is typically used to rate limit clicks, mouse and keyboard actions.
 
 For example, to avoid validating an email until the field is blurred, while validating
 the username at most every 2 seconds after a user changes the field:
@@ -291,6 +295,39 @@ Now imagine you want to customize what happens when the `"clicked"` event is pus
 
 See `Phoenix.LiveView.JS.push/3` for all supported options.
 
+## Lifecycle Events
+
+LiveView supports the `phx-mounted`, `phx-connected`, and `phx-disconnected` events to react to
+different lifecycle events with JS commands.
+
+To execute commands when an element first appears on the page, you can leverage `phx-mounted`,
+such as to animate a notice into view:
+
+```heex
+<div id="flash" class="hidden" phx-mounted={JS.show(transition: ...)}>
+  Welcome back!
+</div>
+```
+
+If `phx-mounted` is used on the initial page render, it will be invoked only after the initial WebSocket connection is established.
+
+To manage the connection lifecycle, you can combine `phx-disconnected` and `phx-connected` to show an element when the LiveView has lost its connection, and hide it when the connection recovers:
+
+```heex
+<div id="status" class="hidden" phx-disconnected={JS.show()} phx-connected={JS.hide()}>
+  Attempting to reconnect...
+</div>
+```
+
+### LiveView vs static view
+
+`phx-connected` and `phx-disconnected` are only executed when operating
+inside a LiveView container. For static templates, they will have no effect.
+
+For LiveView, the `phx-mounted` binding is executed as soon as the LiveView is
+mounted with a connection. When using `phx-mounted` in static views, it is executed
+as soon as the DOM is ready.
+
 ## LiveView Specific Events
 
 The `lv:` event prefix supports LiveView specific features that are handled
@@ -341,3 +378,6 @@ container:
   - `"phx-error"` - applied when an error occurs on the server. Note, this
     class will be applied in conjunction with `"phx-loading"` if connection
     to the server is lost.
+
+For navigation related loading states (both automatic and manual), see `phx-page-loading` as described in
+[JavaScript interoperability: Live navigation events](js-interop.html#live-navigation-events).

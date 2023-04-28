@@ -10,6 +10,26 @@ defmodule Phoenix.LiveView.Utils do
 
   @max_flash_age :timer.seconds(60)
 
+  @valid_uri_schemes [
+    "http:",
+    "https:",
+    "ftp:",
+    "ftps:",
+    "mailto:",
+    "news:",
+    "irc:",
+    "gopher:",
+    "nntp:",
+    "feed:",
+    "telnet:",
+    "mms:",
+    "rtsp:",
+    "svn:",
+    "tel:",
+    "fax:",
+    "xmpp:"
+  ]
+
   @doc """
   Assigns a value if it changed.
   """
@@ -17,6 +37,49 @@ defmodule Phoenix.LiveView.Utils do
     case socket do
       %{assigns: %{^key => ^value}} -> socket
       %{} -> force_assign(socket, key, value)
+    end
+  end
+
+  @doc """
+  Assigns the given `key` with value from `fun` into `socket_or_assigns` if one does not yet exist.
+  """
+  def assign_new(%Socket{} = socket, key, fun) when is_function(fun, 1) do
+    case socket do
+      %{assigns: %{^key => _}} ->
+        socket
+
+      %{private: %{assign_new: {assigns, keys}}} ->
+        # It is important to store the keys even if they are not in assigns
+        # because maybe the controller doesn't have it but the view does.
+        socket = put_in(socket.private.assign_new, {assigns, [key | keys]})
+
+        Phoenix.LiveView.Utils.force_assign(
+          socket,
+          key,
+          case assigns do
+            %{^key => value} -> value
+            %{} -> fun.(socket.assigns)
+          end
+        )
+
+      %{assigns: assigns} ->
+        Phoenix.LiveView.Utils.force_assign(socket, key, fun.(assigns))
+    end
+  end
+
+  def assign_new(%Socket{} = socket, key, fun) when is_function(fun, 0) do
+    case socket do
+      %{assigns: %{^key => _}} ->
+        socket
+
+      %{private: %{assign_new: {assigns, keys}}} ->
+        # It is important to store the keys even if they are not in assigns
+        # because maybe the controller doesn't have it but the view does.
+        socket = put_in(socket.private.assign_new, {assigns, [key | keys]})
+        Phoenix.LiveView.Utils.force_assign(socket, key, Map.get_lazy(assigns, key, fun))
+
+      %{} ->
+        Phoenix.LiveView.Utils.force_assign(socket, key, fun.())
     end
   end
 
@@ -48,12 +111,14 @@ defmodule Phoenix.LiveView.Utils do
   """
   def clear_changed(%Socket{private: private, assigns: assigns} = socket) do
     temporary = Map.get(private, :temporary_assigns, %{})
+    %{socket | assigns: assigns |> Map.merge(temporary) |> Map.put(:__changed__, %{})}
+  end
 
-    %Socket{
-      socket
-      | assigns: assigns |> Map.merge(temporary) |> Map.put(:__changed__, %{}),
-        private: Map.put(private, :__changed__, %{})
-    }
+  @doc """
+  Clears temporary data (flash, pushes, etc) from the socket privates.
+  """
+  def clear_temp(socket) do
+    put_in(socket.private.__temp__, %{})
   end
 
   @doc """
@@ -64,6 +129,7 @@ defmodule Phoenix.LiveView.Utils do
   @doc """
   Checks if the given assign changed.
   """
+  def changed?(%Socket{} = socket, assign), do: changed?(socket.assigns, assign)
   def changed?(%{__changed__: nil}, _assign), do: true
   def changed?(%{__changed__: changed}, assign), do: Map.has_key?(changed, assign)
 
@@ -122,7 +188,34 @@ defmodule Phoenix.LiveView.Utils do
   def post_mount_prune(%Socket{} = socket) do
     socket
     |> clear_changed()
+    |> clear_temp()
     |> drop_private([:connect_info, :connect_params, :assign_new])
+  end
+
+  @doc """
+  Validate and normalizes the layout.
+  """
+  def normalize_layout(false, _warn_ctx), do: false
+
+  def normalize_layout({mod, layout}, _warn_ctx) when is_atom(mod) and is_atom(layout) do
+    {mod, Atom.to_string(layout)}
+  end
+
+  def normalize_layout({mod, layout}, warn_ctx) when is_atom(mod) and is_binary(layout) do
+    root_template = Path.rootname(layout)
+
+    IO.warn(
+      "passing a string as a layout template in #{warn_ctx} is deprecated, please pass " <>
+        "{#{inspect(mod)}, :#{root_template}} instead of {#{inspect(mod)}, \"#{root_template}.html\"}"
+    )
+
+    {mod, root_template}
+  end
+
+  def normalize_layout(other, _warn_ctx) do
+    raise ArgumentError,
+          ":layout expects a tuple of the form {MyLayoutView, :my_template} or false, " <>
+            "got: #{inspect(other)}"
   end
 
   @doc """
@@ -141,8 +234,8 @@ defmodule Phoenix.LiveView.Utils do
         assigns = put_in(assigns[:inner_content], inner_content)
         assigns = put_in(assigns.__changed__[:inner_content], true)
 
-        layout_template
-        |> layout_mod.render(assigns)
+        layout_mod
+        |> Phoenix.Template.render(to_string(layout_template), "html", assigns)
         |> check_rendered!(layout_mod)
 
       false ->
@@ -193,7 +286,7 @@ defmodule Phoenix.LiveView.Utils do
     new_flash = Map.delete(socket.assigns.flash, key)
 
     socket = assign(socket, :flash, new_flash)
-    update_in(socket.private.__changed__[:flash], &Map.delete(&1 || %{}, key))
+    update_in(socket.private.__temp__[:flash], &Map.delete(&1 || %{}, key))
   end
 
   @doc """
@@ -204,14 +297,14 @@ defmodule Phoenix.LiveView.Utils do
     new_flash = Map.put(assigns.flash, key, msg)
 
     socket = assign(socket, :flash, new_flash)
-    update_in(socket.private.__changed__[:flash], &Map.put(&1 || %{}, key, msg))
+    update_in(socket.private.__temp__[:flash], &Map.put(&1 || %{}, key, msg))
   end
 
   @doc """
   Returns a map of the flash messages which have changed.
   """
   def changed_flash(%Socket{} = socket) do
-    socket.private.__changed__[:flash] || %{}
+    socket.private.__temp__[:flash] || %{}
   end
 
   defp flash_key(binary) when is_binary(binary), do: binary
@@ -225,28 +318,28 @@ defmodule Phoenix.LiveView.Utils do
   redirects, the events won't be invoked.
   """
   def push_event(%Socket{} = socket, event, %{} = payload) do
-    update_in(socket.private.__changed__[:push_events], &[[event, payload] | &1 || []])
+    update_in(socket.private.__temp__[:push_events], &[[event, payload] | &1 || []])
   end
 
   @doc """
   Annotates the reply in the socket changes.
   """
   def put_reply(%Socket{} = socket, %{} = payload) do
-    put_in(socket.private.__changed__[:push_reply], payload)
+    put_in(socket.private.__temp__[:push_reply], payload)
   end
 
   @doc """
   Returns the push events in the socket.
   """
   def get_push_events(%Socket{} = socket) do
-    Enum.reverse(socket.private.__changed__[:push_events] || [])
+    Enum.reverse(socket.private.__temp__[:push_events] || [])
   end
 
   @doc """
   Returns the reply in the socket.
   """
   def get_reply(%Socket{} = socket) do
-    socket.private.__changed__[:push_reply]
+    socket.private.__temp__[:push_reply]
   end
 
   @doc """
@@ -280,7 +373,7 @@ defmodule Phoenix.LiveView.Utils do
     attempted to live patch while mounting.
 
     a LiveView cannot be mounted while issuing a live patch to the client. \
-    Use push_redirect/2 or redirect/2 instead if you wish to mount and redirect.
+    Use push_navigate/2 or redirect/2 instead if you wish to mount and redirect.
     """
   end
 
@@ -316,11 +409,11 @@ defmodule Phoenix.LiveView.Utils do
   @doc """
   Calls the `c:Phoenix.LiveComponent.mount/1` callback, otherwise returns the socket as is.
   """
-  def maybe_call_live_component_mount!(%Socket{} = socket, view) do
-    if function_exported?(view, :mount, 1) do
+  def maybe_call_live_component_mount!(%Socket{} = socket, component) do
+    if Code.ensure_loaded?(component) and function_exported?(component, :mount, 1) do
       socket
-      |> view.mount()
-      |> handle_mount_result!({:mount, 1, view})
+      |> component.mount()
+      |> handle_mount_result!({:mount, 1, component})
     else
       socket
     end
@@ -456,18 +549,8 @@ defmodule Phoenix.LiveView.Utils do
     """
   end
 
-  defp do_mount_opt(socket, :layout, {mod, template}) when is_atom(mod) and is_binary(template) do
-    %Socket{socket | private: Map.put(socket.private, :phoenix_live_layout, {mod, template})}
-  end
-
-  defp do_mount_opt(socket, :layout, false) do
-    %Socket{socket | private: Map.put(socket.private, :phoenix_live_layout, false)}
-  end
-
-  defp do_mount_opt(_socket, :layout, bad_layout) do
-    raise ArgumentError,
-          "the :layout mount option expects a tuple of the form {MyLayoutView, \"my_template.html\"}, " <>
-            "got: #{inspect(bad_layout)}"
+  defp do_mount_opt(socket, :layout, layout) do
+    put_in(socket.private[:live_layout], normalize_layout(layout, "mount options"))
   end
 
   defp do_mount_opt(socket, :temporary_assigns, temp_assigns) do
@@ -495,12 +578,43 @@ defmodule Phoenix.LiveView.Utils do
 
   defp layout(socket, view) do
     case socket.private do
-      %{phoenix_live_layout: layout} -> layout
-      %{} -> view.__live__()[:layout] || false
+      %{live_layout: layout} -> layout
+      %{} -> view.__live__()[:layout]
     end
   end
 
   defp flash_salt(endpoint_mod) when is_atom(endpoint_mod) do
     "flash:" <> salt!(endpoint_mod)
+  end
+
+  def valid_destination!(%URI{} = uri, context) do
+    valid_destination!(URI.to_string(uri), context)
+  end
+
+  def valid_destination!({:safe, to}, context) do
+    {:safe, valid_string_destination!(IO.iodata_to_binary(to), context)}
+  end
+
+  def valid_destination!({other, to}, _context) when is_atom(other) do
+    [Atom.to_string(other), ?:, to]
+  end
+
+  def valid_destination!(to, context) do
+    valid_string_destination!(IO.iodata_to_binary(to), context)
+  end
+
+  for scheme <- @valid_uri_schemes do
+    def valid_string_destination!(unquote(scheme) <> _ = string, _context), do: string
+  end
+
+  def valid_string_destination!(to, context) do
+    if not match?("/" <> _, to) and String.contains?(to, ":") do
+      raise ArgumentError, """
+      unsupported scheme given to #{context}. In case you want to link to an
+      unknown or unsafe scheme, such as javascript, use a tuple: {:javascript, rest}
+      """
+    else
+      to
+    end
   end
 end

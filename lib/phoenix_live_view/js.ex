@@ -63,22 +63,33 @@ defmodule Phoenix.LiveView.JS do
   with the event, apply loading states to external elements, etc. For example,
   given this basic `phx-click` event:
 
-      <div phx-click="inc">+</div>
+      <button phx-click="inc">+</button>
 
   Imagine you need to target your current component, and apply a loading state
   to the parent container while the client awaits the server acknowledgement:
 
       alias Phoenix.LiveView.JS
 
-      <div phx-click={JS.push("inc", loading: ".thermo", target: @myself)}>+</div>
+      <button phx-click={JS.push("inc", loading: ".thermo", target: @myself)}>+</button>
 
   Push commands also compose with all other utilities. For example,
   to add a class when pushing:
 
-      <div phx-click={
+      <button phx-click={
         JS.push("inc", loading: ".thermo", target: @myself)
-        |> JS.add_class(".warmer", to: ".thermo")
-      }>+</div>
+        |> JS.add_class("warmer", to: ".thermo")
+      }>+</button>
+
+  Any `phx-value-*` attributes will also be included in the payload, their
+  values will be overwritten by values given directly to `push/1`. Any
+  `phx-target` attribute will also be used, and overwritten.
+
+      <button
+        phx-click={JS.push("inc", value: %{limit: 40})}
+        phx-value-room="bedroom"
+        phx-value-limit="this value will be 40"
+        phx-target={@myself}
+      >+</button>
 
   ## Custom JS events with `JS.dispatch/1` and `window.addEventListener`
 
@@ -110,10 +121,15 @@ defmodule Phoenix.LiveView.JS do
   The combination of `dispatch/1` with `window.addEventListener` is
   a powerful mechanism to increase the amount of actions you can trigger
   client-side from your LiveView code.
+
+  You can also use `window.addEventListener` to listen to events pushed
+  from the server. You can learn more in our [JS interoperability guide](js-interop.md).
   '''
   alias Phoenix.LiveView.JS
 
   defstruct ops: []
+
+  @opaque t :: %__MODULE__{}
 
   @default_transition_time 200
 
@@ -130,11 +146,14 @@ defmodule Phoenix.LiveView.JS do
 
   ## Options
 
-    * `:target` - The selector or component ID to push to
-    * `:loading` - The selector to apply the phx loading classes to
+    * `:target` - The selector or component ID to push to. This value will
+      overwrite any `phx-target` attribute present on the element.
+    * `:loading` - The selector to apply the phx loading classes to.
     * `:page_loading` - Boolean to trigger the phx:page-loading-start and
-      phx:page-loading-stop events for this push. Defaults to `false`
-    * `:value` - The map of values to send to the server
+      phx:page-loading-stop events for this push. Defaults to `false`.
+    * `:value` - The map of values to send to the server. These values will be
+      merged over any `phx-value-*` attributes that are present on the element.
+      All keys will be treated as strings when merging.
 
   ## Examples
 
@@ -245,7 +264,7 @@ defmodule Phoenix.LiveView.JS do
   end
 
   @doc """
-  Toggles elements.
+  Toggles element visibility.
 
   ## Options
 
@@ -313,8 +332,10 @@ defmodule Phoenix.LiveView.JS do
       Defaults #{@default_transition_time}
     * `:display` - The optional display value to set when showing. Defaults `"block"`.
 
-  When the show is complete on the client, a `phx:show-start` and `phx:show-end` event
-  will be dispatched to the shown elements.
+  During the process, the following events will be dispatched to the shown elements:
+
+    * When the action is triggered on the client, `phx:show-start` is dispatched.
+    * After the time specified by `:time`, `phx:show-end` is dispatched.
 
   ## Examples
 
@@ -356,12 +377,14 @@ defmodule Phoenix.LiveView.JS do
     * `:transition` - The string of classes to apply before hiding or
       a 3-tuple containing the transition class, the class to apply
       to start the transition, and the ending transition class, such as:
-      `{"ease-out duration-300", "opacity-0", "opacity-100"}`
+      `{"ease-out duration-300", "opacity-100", "opacity-0"}`
     * `:time` - The time to apply the transition from `:transition`.
       Defaults #{@default_transition_time}
 
-  When the show is complete on the client, a `phx:hide-start` and `phx:hide-end`
-  event will be dispatched to the hidden elements.
+  During the process, the following events will be dispatched to the hidden elements:
+
+    * When the action is triggered on the client, `phx:hide-start` is dispatched.
+    * After the time specified by `:time`, `phx:hide-end` is dispatched.
 
   ## Examples
 
@@ -596,7 +619,165 @@ defmodule Phoenix.LiveView.JS do
     put_op(js, "remove_attr", %{to: opts[:to], attr: attr})
   end
 
-  defp put_op(%JS{ops: ops} = js, kind, %{} = args) do
+  @doc """
+  Sends focus to a selector.
+
+  ## Options
+
+    * `:to` - The optional DOM selector to send focus to.
+      Defaults to the current element.
+
+  ## Examples
+
+      JS.focus(to: "main")
+  """
+  def focus(), do: focus(%JS{}, [])
+  def focus(%JS{} = js), do: focus(js, [])
+  def focus(opts) when is_list(opts), do: focus(%JS{}, opts)
+  def focus(%JS{} = js, opts) when is_list(opts) do
+    opts = validate_keys(opts, :focus, [:to])
+    put_op(js, "focus", %{to: opts[:to]})
+  end
+
+  @doc """
+  Sends focus to the first focusable child in selector.
+
+  ## Options
+
+    * `:to` - The optional DOM selector to focus.
+      Defaults to the current element.
+
+  ## Examples
+
+      JS.focus_first(to: "#modal")
+  """
+  def focus_first(), do: focus_first(%JS{}, [])
+  def focus_first(%JS{} = js), do: focus_first(js, [])
+  def focus_first(opts) when is_list(opts), do: focus_first(%JS{}, opts)
+  def focus_first(%JS{} = js, opts) when is_list(opts) do
+    opts = validate_keys(opts, :focus_first, [:to])
+    put_op(js, "focus_first", %{to: opts[:to]})
+  end
+
+  @doc """
+  Pushes focus from the source element to be later popped.
+
+  ## Options
+
+    * `:to` - The optional DOM selector to push focus to.
+      Defaults to the current element.
+
+  ## Examples
+
+      JS.push_focus()
+      JS.push_focus(to: "#my-button")
+  """
+  def push_focus(), do: push_focus(%JS{}, [])
+  def push_focus(%JS{} = js), do: push_focus(js, [])
+  def push_focus(opts) when is_list(opts), do: push_focus(%JS{}, opts)
+  def push_focus(%JS{} = js, opts) when is_list(opts) do
+    opts = validate_keys(opts, :push_focus, [:to])
+    put_op(js, "push_focus", %{to: opts[:to]})
+  end
+
+  @doc """
+  Focuses the last pushed element.
+
+  ## Examples
+
+      JS.pop_focus()
+  """
+  def pop_focus(), do: pop_focus(%JS{})
+  def pop_focus(%JS{} = js) do
+    put_op(js, "pop_focus", %{})
+  end
+
+  @doc """
+  Sends a navigation event to the server and updates the browser's pushState history.
+
+  ## Options
+
+    * `:replace` - Whether to replace the browser's pushState history. Defaults false.
+
+  ## Examples
+
+      JS.navigate("/my-path")
+  """
+  def navigate(href) when is_binary(href) do
+    navigate(%JS{}, href, [])
+  end
+  def navigate(href, opts) when is_binary(href) and is_list(opts) do
+    navigate(%JS{}, href, opts)
+  end
+  def navigate(%JS{} = js, href) when is_binary(href) do
+    navigate(js, href, [])
+  end
+  def navigate(%JS{} = js, href, opts) when is_binary(href) and is_list(opts) do
+    opts = validate_keys(opts, :navigate, [:replace])
+    put_op(js, "navigate", %{href: href, replace: !!opts[:replace]})
+  end
+
+  @doc """
+  Sends a patch event to the server and updates the browser's pushState history.
+
+  ## Options
+
+    * `:replace` - Whether to replace the browser's pushState history. Defaults false.
+
+  ## Examples
+
+      JS.patch("/my-path")
+  """
+  def patch(href) when is_binary(href) do
+    patch(%JS{}, href, [])
+  end
+  def patch(href, opts) when is_binary(href) and is_list(opts) do
+    patch(%JS{}, href, opts)
+  end
+  def patch(%JS{} = js, href) when is_binary(href) do
+    patch(js, href, [])
+  end
+  def patch(%JS{} = js, href, opts) when is_binary(href) and is_list(opts) do
+    opts = validate_keys(opts, :patch, [:replace])
+    put_op(js, "patch", %{href: href, replace: !!opts[:replace]})
+  end
+
+  @doc """
+  Executes JS commands located in element attributes.
+
+    * `attr` - The string attribute where the JS command is specified
+
+  ## Options
+
+    * `:to` - The optional DOM selector to fetch the attribute from.
+      Defaults to the current element.
+
+  ## Examples
+
+      <div id="modal" phx-remove={JS.hide("#modal")}>...</div>
+      <button phx-click={JS.exec("phx-remove", to: "#modal")}>close</button>
+  """
+  def exec(attr) when is_binary(attr) do
+    exec(%JS{}, attr, [])
+  end
+
+  @doc "See `exec/1`."
+  def exec(attr, opts) when is_binary(attr) and is_list(opts) do
+    exec(%JS{}, attr, opts)
+  end
+
+  def exec(%JS{} = js, attr) when is_binary(attr) do
+    exec(js, attr, [])
+  end
+
+  @doc "See `exec/1`."
+  def exec(%JS{} = js, attr, opts) when is_binary(attr) and is_list(opts) do
+    opts = validate_keys(opts, :exec, [:to])
+    ops = if to = opts[:to], do: [attr, to], else: [attr]
+    put_op(js, "exec", ops)
+  end
+
+  defp put_op(%JS{ops: ops} = js, kind, args) do
     %JS{js | ops: ops ++ [[kind, args]]}
   end
 

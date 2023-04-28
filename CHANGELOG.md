@@ -1,6 +1,232 @@
 # Changelog
 
-## 0.17.10 (Unreleased)
+## 0.19
+
+### Backwards incompatible changes
+  * Drop support for passing an id to the `phx-feedback-for` attribute. An input name must be passed instead.
+  * Remove previously deprecated `let` attribute. Use `:let` instead
+  * Remove previously deprecated `<%= live_img_preview(entry) %>`. Use `<.live_img_preview entry={entry} />` instead
+  * Remove previously deprecated `<%= live_file_upload(upload) %>`. Use `<.live_file_upload upload={upload} />` instead
+  * Remove previously deprecated `<%= live_component(Component) %>`. Use `<.live_component module={Component} id=\"hello\" />` instead
+
+### Enhancements
+  * Support ordered inputs within `inputs_for`, to pair with Ecto's new `sort_param` and `drop_param` casting
+  * Send form phx-value's on form events
+
+### Deprecations
+  * Deprecate passing `:dom_id` to `stream/4` in favor of `stream_configure/3`
+  * Deprecate `render_block/2` in favor of `render_slot/2`
+  * Deprecate `<%= live_img_preview(entry, opts) %>`. Use `<.live_img_preview entry={entry} {opts} />`
+  * Deprecate `<%= live_file_upload(upload, opts) %>`. Use `<.live_file_upload upload={upload} {opts} />`
+  * Deprecate stateless LiveComponent in favor of function components or in favor of `<.live_component id={...} />` (note the `id` is required)
+
+### Bug fixes
+  * Fix stream deletes not being sent on nested for comprehensions
+
+## 0.18.18 (2023-03-16)
+
+### Bug fixes
+  * Allow `:live_action` to be assigned in a component
+  * Only filter internal function component attributes in `assigns_to_attributes`
+  * Only include submitter with name
+
+### Enhancements
+  * Add `JS.exec` command for executing commands defined on other element attributes
+
+## 0.18.17 (2023-03-09)
+
+### Bug Fixes
+  * Fix callbacks like `handle_info` failing to be invoked in development after a code change with the Phoenix code reloader
+
+### Enhancements
+  * Support [`submitter`](https://developer.mozilla.org/en-US/docs/Web/API/SubmitEvent/submitter) on form submit events.
+  * Avoid compile-time dependency for `attr` when referencing structs
+  * Validate reserved assigns. Attempting to assign `:uploads`, `:streams`, `:live_action`, `:socket`, `:myself` will now raise in `LiveView` and `LiveComponent`
+
+## 0.18.16 (2023-02-23)
+
+### Enhancements
+  * Support streams in Live Components
+  * Optimize plug error translation when a Plug.Exception is raised over connected LiveView
+
+### Bug Fixes
+  * Fix formatter issues when there are multiple HTML comments
+
+## 0.18.15 (2023-02-16)
+
+### Bug Fixes
+  * Fix `JS.transition` applying incorrect classes
+
+### Enhancements
+  * Reset phx-feedback-for errors on `type="reset"` inputs and buttons
+
+## 0.18.14 (2023-02-14)
+
+### Bug Fixes
+  * Fix LiveViewTest failing to find main live view
+
+## 0.18.13 (2023-02-10)
+
+### Enhancements
+  * Improve error message when failing to use Phoenix.Component
+
+## 0.18.12 (2023-02-10)
+
+### Enhancements
+  * Introduce streams for efficiently handling large collections
+  * Allow replies from `:handle_event` lifecycle hooks
+  * Add `<.inputs_for>` component to `Phoenix.Component`
+  * Support replies on lifecycle `:handle_event` hooks
+
+### Bug Fixes
+  * Fix change tracking when re-assigning a defaulted attribute to same default value
+  * Fix upload drag and drop failing to worka after using file select dialog
+  * Fix form recovery when form's first input is phx-change
+
+## 0.18.11 (2023-01-19)
+
+### Bug Fixes
+  * Fix socket unloading connection for forms that have defaulted prevented
+
+## 0.18.10 (2023-01-18)
+
+### Bug Fixes
+  * Fix svg tags with href incorrectly unloading socket on click
+  * Fix form submits with `target="_blank"` incorrectly unloading socket on submit
+
+## 0.18.9 (2023-01-17)
+
+### Bug Fixes
+  * Fix regular form submits failing to be dispatched
+
+## 0.18.8 (2023-01-16)
+
+### Enhancements
+  * Restore scroll position on back when previous navigation was live patch
+
+### Bug Fixes
+  * Fix live layout not being applied until connected render
+
+## 0.18.7 (2023-01-13)
+
+### Bug Fixes
+  * Fix live layout not being applied when passed to `:live_session` during disconnect render
+  * Fix external anchor clicks and links with hashes incorrectly unloading socket
+
+## 0.18.6 (2023-01-09)
+
+### Bug Fixes
+  * Fix external anchor click unloading on external click
+
+## 0.18.5 (2023-01-09)
+
+### Bug Fixes
+  * Fix external anchor click unloading socket
+
+## 0.18.4 (2023-01-05)
+
+### Enhancements
+  * Support string upload name to support dynamically generated `allow_upload`'s
+
+### Bug Fixes
+  * Fix nested LiveView race condition on live patch causing nested child to skip updates in some cases
+  * Fix browser history showing incorrect title when using live navigation with `@page_title`
+  * Fix undefined _target param when using `JS.push` for form changes
+  * Fix `phx-no-feedback` missing from inputs added after a form submit
+  * Fix `phx-disconnected` events firing when navigating away or submitting external forms
+
+## 0.18.3 (2022-10-26)
+
+### Enhancements
+  * Add `embed_templates` to `Phoenix.Component` for embedding template files as function components
+  * Raise on global slot attributes
+
+### Bug Fixes
+  * Fix bug on slots when passing multiple slot entries with mix if/for syntax
+
+## 0.18.2 (2022-10-04)
+
+### Bug Fixes
+  * Fix match error when defining `:values` before `:default`
+  * Allow tuples in external redirects
+  * Fix race condition on dispatching click away when enter is pressed
+  * Fix formatter breaking inline blocks when surrounded by text without whitespace
+
+### Enhancements
+  * Add `intersperse` component for rendering a separator between an enumerable
+
+## 0.18.1 (2022-09-28)
+
+### Bug Fixes
+  * Fix phx-loading class being applied to dead views
+  * Fix `<.live_img_preview />` causing invalid attribute errors on uploads
+  * Do not fire phx events when element is disabled
+
+### Enhancements
+  * Support `:include` option to extend global attributes on a case-by-case basis
+  * Warn when accessing a variable binding defined outside of `~H`
+
+## 0.18.0 (2022-09-20)
+
+LiveView v0.18 includes a major new feature in the form of declarative assigns with new `attr`
+and `slot` APIs for specifying which attributes a function component supports, the type,
+and default values. Attributes and slots are compile-time verified and emit warnings (requires Elixir v1.14.0+).
+
+v0.18 includes a number of new function components which replace their EEx expression
+counterparts `<%= ... %>`. For example, `live_redirect`, `live_patch`, and Phoenix.HTML's
+`link` have been replaced by a unified `Phoenix.Component.link/1` function component:
+
+    <.link href="https://myapp.com">my app</.link>
+    <.link navigate={@path}>remount</.link>
+    <.link patch={@path}>patch</.link>
+
+Those new components live in the `Phoenix.Component` module. `Phoenix.LiveView.Helpers`
+itself has been soft deprecated and all relevant functionality has been migrated.
+You must `import Phoenix.Component` where you previously imported `Phoenix.LiveView.Helpers`
+when upgrading. You may also need to `import Phoenix.Component` where you also imported `Phoenix.LiveView` and some of its functions have been moved to `Phoenix.Component`.
+
+Additionally, the special `let` attribute on function components have been deprecated by
+a `:let` usage.
+
+### Deprecations
+  - `live_redirect` - deprecate in favor of new `<.link navigate={..}>` component of `Phoenix.Component`
+  - `live_patch` - deprecate in favor of new `<.link patch={..}>` component of `Phoenix.Component`
+  - `push_redirect` - deprecate in favor of new `push_navigate` function on `Phoenix.LiveView`
+
+### Enhancements
+  - [Component] Add declarative assigns with compile-time verifications and warnings via `attr`/`slot`
+  - [Component] Add new attrs `:let` and `:for`, and `:if` with HTML tag, function component, and slot support. We still support `let` but the formatter will convert it to `:let` and soon it will be deprecated.
+  - [Component] Add `dynamic_tag` function component
+  - [Component] Add `link` function component
+  - [Component] Add `focus_wrap` function component to wrap focus around content like modals and dialogs for accessibility
+  - [Logger] Add new LiveView logger with telemetry instrumentation for lifecycle events
+  - [JS] Add new JS commands for `focus`, `focus_first`, `push_focus`, and `pop_focus` for accessibility
+  - [Socket] Support sharing `Phoenix.LiveView.Socket` with regular channels via `use Phoenix.LiveView.Socket`
+  - Add `_live_referer` connect param for handling `push_navigate` referal URL
+  - Add new `phx-connected` and `phx-disconnected` bindings for reacting to lifecycle changes
+  - Add dead view support for JS commands
+  - Add dead view support for hooks
+
+### Bug fixes
+  - Fix external upload issue where listeners are not cleaned up when an external failure happens on the client
+  - Do not debounce `phx-blur`
+
+## 0.17.12 (2022-09-20)
+
+### Enhancements
+  - Add support for upcoming Phoenix 1.7 flash interface
+
+## 0.17.11 (2022-07-11)
+
+### Enhancements
+  - Add `replaceTransport` to LiveSocket
+
+### Bug fixes
+  - Cancel debounced events from firing after a live navigation event
+  - Fix hash anchor failing to scroll to anchor element on live navigation
+  - Do not debounce `phx-blur` events
+
+## 0.17.10 (2022-05-25)
 
 ### Bug fixes
   - [Formatter] Preserve single quote delimiter on attrs
@@ -340,7 +566,7 @@ component named `form`:
 
 ```elixir
 ~H"""
-<.form let={f} for={@changeset}>
+<.form :let={f} for={@changeset}>
   <%= input f, :foo %>
 </.form>
 """
@@ -969,7 +1195,7 @@ The steps are:
   4) You should define the CSRF meta tag inside <head> in your layout, before `app.js` is included:
 
       ```heex
-      <%= csrf_meta_tag() %>
+      <meta name="csrf-token" content={Plug.CSRFProtection.get_csrf_token()} />
       <script type="text/javascript" src="<%= Routes.static_path(@conn, "/js/app.js") %>"></script>
       ```
 

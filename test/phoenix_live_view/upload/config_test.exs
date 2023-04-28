@@ -183,6 +183,7 @@ defmodule Phoenix.LiveView.UploadConfigTest do
 
       %{
         "name" => name,
+        "relative_path" => relative_path,
         "size" => size,
         "ref" => ref,
         "type" => type
@@ -194,6 +195,7 @@ defmodule Phoenix.LiveView.UploadConfigTest do
       assert [
                %Phoenix.LiveView.UploadEntry{
                  client_name: ^name,
+                 client_relative_path: ^relative_path,
                  client_size: ^size,
                  client_type: ^type,
                  ref: ^ref
@@ -210,6 +212,7 @@ defmodule Phoenix.LiveView.UploadConfigTest do
 
       %{
         "name" => name,
+        "relative_path" => relative_path,
         "size" => size,
         "ref" => ref,
         "type" => type
@@ -221,6 +224,7 @@ defmodule Phoenix.LiveView.UploadConfigTest do
       assert [
                %Phoenix.LiveView.UploadEntry{
                  client_name: ^name,
+                 client_relative_path: ^relative_path,
                  client_size: ^size,
                  client_type: ^type,
                  ref: ^ref
@@ -383,10 +387,17 @@ defmodule Phoenix.LiveView.UploadConfigTest do
     end
   end
 
+  test "supports binary upload name" do
+    assert LiveView.allow_upload(build_socket(), "avatar", accept: ~w(image/png .jpeg))
+  end
+
   defp build_client_entry(name, attrs \\ %{}) do
+    name = "#{name}_#{System.unique_integer([:positive, :monotonic])}"
+
     attrs
     |> Enum.into(%{
-      "name" => "#{name}_#{System.unique_integer([:positive, :monotonic])}",
+      "name" => name,
+      "relative_path" => "./#{name}",
       "last_modified" => DateTime.utc_now() |> DateTime.to_unix(),
       "size" => 1024,
       "type" => "application/octet-stream"
