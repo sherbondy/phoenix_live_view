@@ -90,6 +90,7 @@ var LiveView = (() => {
   var PHX_STATIC = "data-phx-static";
   var PHX_READONLY = "data-phx-readonly";
   var PHX_DISABLED = "data-phx-disabled";
+  var PHX_NO_DISCONNECT = "data-phx-no-disconnect";
   var PHX_DISABLE_WITH = "disable-with";
   var PHX_DISABLE_WITH_RESTORE = "data-phx-disable-with-restore";
   var PHX_HOOK = "hook";
@@ -336,7 +337,9 @@ var LiveView = (() => {
     },
     wantsNewTab(e) {
       let wantsNewTab = e.ctrlKey || e.shiftKey || e.metaKey || e.button && e.button === 1;
-      return wantsNewTab || e.target.getAttribute("target") === "_blank";
+      let isDownload = e.target instanceof HTMLAnchorElement && e.target.hasAttribute("download");
+      let isTargetBlank = e.target.getAttribute("target") === "_blank";
+      return wantsNewTab || isTargetBlank || isDownload;
     },
     isUnloadableFormSubmit(e) {
       return !e.defaultPrevented && !this.wantsNewTab(e);
@@ -4044,7 +4047,8 @@ within:
         let phxEvent = target && target.getAttribute(click);
         if (!phxEvent) {
           let href = e.target instanceof HTMLAnchorElement ? e.target.getAttribute("href") : null;
-          if (!capture && href !== null && !dom_default.wantsNewTab(e) && dom_default.isNewPageHref(href, window.location)) {
+          let phxNoDisconnect = e.target.hasAttribute(PHX_NO_DISCONNECT);
+          if (!capture && href !== null && !dom_default.wantsNewTab(e) && dom_default.isNewPageHref(href, window.location) && !phxNoDisconnect) {
             this.unload();
           }
           return;
